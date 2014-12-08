@@ -39,10 +39,10 @@ else
     die "cannot load wsdl";
 }
 
-my $soap12_namespace = $wsdl_string =~ m{xmlns:(\w+)="http://schemas.xmlsoap.org/wsdl/soap12/"};
+my ($soap12_namespace) = $wsdl_string =~ m{xmlns:(\w+)="http://schemas.xmlsoap.org/wsdl/soap12/"};
 if ($soap12_namespace)
 {
-    warn "this script currently only works with SOAP 1.1...";
+    warn "this script currently only works with SOAP 1.1...stomping all soap12 elements";
     $wsdl_string =~ s{$soap12_namespace:}{${soap12_namespace}_}gms;
 }
 
@@ -66,6 +66,9 @@ unless ($PACKAGE_PREFIX)
 }
 $PACKAGE_PREFIX =~ s/::$//;
 print "package prefix will be: $PACKAGE_PREFIX\n";
+
+my $TARGET_NAMESPACE = $wsdl_root->findvalue('@targetNamespace');
+die "cannot find target namespace in WSDL root node" unless $TARGET_NAMESPACE;
 
 # remove root attributes...LibXML is finicky
 $wsdl_string =~ s{(<\w+) [^>]+}{$1};
@@ -405,18 +408,19 @@ print "\n";
 print "**********************************************************************\n";
 print "CREATING SERVICE\n";
 print "**********************************************************************\n";
-
-my $service = "package $PACKAGE_PREFIX;\n";
+my $service_module_name = $PACKAGE_PREFIX . 'Client';
+my $service = "package $service_module_name;\n";
 $service .= "use Moo;\n";
 $service .= "extends 'SOAP::Sanity::Service';\n\n";
 $service .= "use ${PACKAGE_PREFIX}::SOAPSanityObjects;\n\n";
 
-$service .= "has endpoint => ( is => 'ro', default => sub { '" . $service_uri . "' } );\n";
+$service .= "has service_uri => ( is => 'ro', default => sub { '" . $service_uri . "' } );\n";
+$service .= "has target_namespace => ( is => 'ro', default => sub { '" . $TARGET_NAMESPACE . "' } );\n";
 
-$service .= "\n=head1 NAME $PACKAGE_PREFIX\n\nThis is a client module to a SOAP API.\n\n=cut\n";
+$service .= "\n=head1 NAME $service_module_name\n\nThis is a client module to a SOAP API.\n\n=cut\n";
 $service .= "\n=head1 SYNOPSIS\n\n";
-$service .= "  use $PACKAGE_PREFIX;\n";
-$service .= "  my \$service = $PACKAGE_PREFIX->new();\n";
+$service .= "  use $service_module_name;\n";
+$service .= "  my \$service = $service_module_name->new();\n";
 $service .= "\n=cut\n\n";
 
 $service .= "=head1 METHODS\n";
@@ -440,20 +444,21 @@ foreach my $method_name ( keys %METHODS )
     $service .= $TAB . '# returns a ' . $PACKAGE_PREFIX . '::' . $output . ' object' . "\n";
     $service .= $TAB . 'my $' . $output . ' = $service->' . $method_name . '($' . $input . ');' . "\n";
     
-    $service .= "\n=cut\n";
+    $service .= "\n=cut\n\n";
     
     $service .= "sub $method_name\n";
     $service .= "{\n";
     $service .= $TAB . 'my ($self, @args) = @_;' . "\n";
-    $service .= $TAB . 'return $self->make_request(\'' . $method_name . '\', @args);' . "\n";
+    $service .= $TAB . 'return $self->_make_request(\'' . $method_name . '\', @args);' . "\n";
     $service .= "}\n";
 }
 $service .= "\n1;\n";
 
-open(my $fh, ">", "$save_path.pm") or die "cannot create $save_path.pm: $!";
+my $service_file_name = $save_path . 'Client.pm';
+open(my $fh, ">", "$service_file_name") or die "cannot create $service_file_name: $!";
 print $fh $service;
 close $fh;
-print "created $save_path.pm\n";
+print "created $service_file_name\n";
 
 sub add_object_creation_pod
 {
