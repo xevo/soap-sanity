@@ -39,6 +39,13 @@ else
     die "cannot load wsdl";
 }
 
+my $soap12_namespace = $wsdl_string =~ m{xmlns:(\w+)="http://schemas.xmlsoap.org/wsdl/soap12/"};
+if ($soap12_namespace)
+{
+    warn "this script currently only works with SOAP 1.1...";
+    $wsdl_string =~ s{$soap12_namespace:}{${soap12_namespace}_}gms;
+}
+
 # remove namespaces to make parsing easier
 # also, this will work with broken wsld files that do not declare namespaces correctly
 # yea, this is a hack...
