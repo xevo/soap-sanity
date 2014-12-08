@@ -1,20 +1,29 @@
 #!/usr/bin/env perl
 use strict;
 
+use lib '../SOAP-Sanity/lib';
+
+use Data::Dumper;
 use LWP::Simple;
 use File::Slurp;
 use XML::LibXML;
 use URI;
+use File::Path qw(make_path);
 
-use Getopt::Long;
+my $TAB = '    ';
 
+my $SAVE_DIR = '.';
 my $PACKAGE_PREFIX;
 my $WSDL_URI;
+use Getopt::Long;
 GetOptions(
+    "save_dir=s" => \$SAVE_DIR,
     "package_prefix=s" => \$PACKAGE_PREFIX,
     "wsdl=s" => \$WSDL_URI,
 );
 die "the --wsdl uri is required (can be a URL or a file path)" unless $WSDL_URI;
+
+$SAVE_DIR =~ s/\/$//;
 
 my $wsdl_string;
 if ($WSDL_URI =~ /^http/)
@@ -44,10 +53,11 @@ my $wsdl_root = $wsdl_dom->documentElement;
 
 unless ($PACKAGE_PREFIX)
 {
-    my $name = $wsdl_root->getAttribute('name');
+    my $name = $wsdl_root->findvalue('//service/@name');
     die "cannot find the service name in the WSDL, you must pass --package_prefix for this service" unless $name;
     $PACKAGE_PREFIX = 'SOAP::Sanity::' . $name;
 }
+$PACKAGE_PREFIX =~ s/::$//;
 print "package prefix will be: $PACKAGE_PREFIX\n";
 
 # remove root attributes...LibXML is finicky
@@ -76,18 +86,18 @@ die "cannot determine service uri" unless $service_uri;
 print "service is at: $service_uri\n";
 
 my %TYPES;
+my %METHODS;
 
 #
 # Load types
 #
-my $types_nodes = $wsdl_root->findnodes('types');
-die "cannot load types" unless $types_nodes;
-foreach my $type_node (@$types_nodes)
+my @types_nodes = $wsdl_root->findnodes('types');
+die "cannot load types" unless @types_nodes;
+foreach my $type_node (@types_nodes)
 {
     print "found types element\n";
     
-    my $schema_nodes = $type_node->findnodes('schema');
-    foreach my $schema_node (@$schema_nodes)
+    SCHEMA_NODES: foreach my $schema_node ( $type_node->findnodes('schema') )
     {
         my $target_namespace = $schema_node->getAttribute('targetNamespace');
         
@@ -95,17 +105,47 @@ foreach my $type_node (@$types_nodes)
         
         TYPE_NODES: foreach my $type_node ( $schema_node->findnodes('./*') )
         {
+            my $node_name = $type_node->nodeName;
             my $name = $type_node->getAttribute('name');
+            my $type = remove_namespace( $type_node->getAttribute('type') );
             
             unless ($name)
             {
                 next TYPE_NODES;
             }
             
+            if ($node_name eq 'element')
+            {
+                # sometimes a ComplexType will be within an element node
+                my ($deeper_type_node) = $type_node->findnodes('complexType');
+                
+                if ($deeper_type_node)
+                {
+                    $type_node = $deeper_type_node;
+                }
+                else
+                {
+                    next TYPE_NODES;
+                }
+            }
+            
+            my $sequence_type = remove_namespace( $type_node->findvalue('sequence/element/@type') );
+            if (( $sequence_type ) && ( $sequence_type eq $name ))
+            {
+                # this is just an element redefining this type...skip it
+                next TYPE_NODES;
+            }
+            
+            my $fields = parse_type($type_node);
+            
+            die "$name type already exists!: " . Dumper($TYPES{$name}) if $TYPES{$name};
+            
             $TYPES{$name} = {
                 name => $name,
-                fields => parse_type($type_node),
+                fields => $fields,
             };
+            
+            print Dumper($TYPES{$name}) . "\n";
         }
     }
 }
@@ -169,7 +209,12 @@ sub parse_type
         }
     }
     
-    return @fields;
+    # remove duplicate fields, keeping the last occurance in the array
+    # dupes can happen when a field is overridden from an extension
+    my %seen;
+    @fields = reverse grep !$seen{ $_->{name} }++, reverse @fields;
+    
+    return \@fields;
 }
 
 # returns an array of fields
@@ -196,6 +241,7 @@ sub parse_field
     $field->{name} = $element_node->getAttribute('name');
     $field->{type} = remove_namespace( $element_node->getAttribute('type') );
     $field->{min_occurs} = $element_node->getAttribute('minOccurs') || 1;
+    $field->{max_occurs} = $element_node->getAttribute('maxOccurs') || 1;
 
     my $nillable = $element_node->getAttribute('nillable') || 'false';
     $field->{nillable} = $nillable eq 'false' ? 0 : 1;
@@ -208,15 +254,16 @@ sub parse_field
 #
 # Load ports (operations)
 #
-my $port_type_nodes = $wsdl_root->findnodes('portType');
-foreach my $port_type_node (@$port_type_nodes)
+foreach my $port_type_node ( $wsdl_root->findnodes('portType') )
 {
     my $name = $port_type_node->getAttribute('name');
     
-    print "found port: $name\n";
+    print "\n";
+    print "**********************************************************************\n";
+    print "PARSING PORT: $name\n";
+    print "**********************************************************************\n";
     
-    my $operation_nodes = $port_type_node->findnodes('operation');
-    foreach my $operation_node (@$operation_nodes)
+    foreach my $operation_node ( $port_type_node->findnodes('operation') )
     {
         my $name = $operation_node->getAttribute('name');
         
@@ -236,16 +283,230 @@ foreach my $port_type_node (@$port_type_nodes)
             ($output_type) = remove_namespace( $wsdl_root->findvalue(q|//message[@name='| . $output . q|']/part/@type|) );
         }
         
-        print "\tfound method: $name\n\t\tinput: $input_type ($input)\n\t\toutput: $output_type ($output)\n";
+        print "\tfound method: $name\n\t\tinput: $input_type (message: $input)\n\t\toutput: $output_type (message: $output)\n";
+    
+        $METHODS{$name} = {
+            input => ($input_type || $input),
+            output => ($output_type || $output),
+        };
     }
 }
 
-# sub create_module
-# {
-#     my (%args) = @_;
-#     
-#     
-# }
+print "\n";
+print "**********************************************************************\n";
+print "CREATING MODULES\n";
+print "**********************************************************************\n";
+
+my $save_path = $SAVE_DIR . '/lib/' . join( '/', split(/::/, $PACKAGE_PREFIX) );
+print "save path: $save_path\n";
+make_path($save_path);
+
+my $module_use_statement = "";
+foreach my $type ( sort { $a->{name} cmp $b->{name} } values %TYPES )
+{
+    my ($module_name, $module_path) = create_type_module($type);
+    $module_use_statement .= "use $module_name;\n";
+}
+
+open(my $fh, ">", "$save_path/SOAPSanityObjects.pm") or die "cannot create $save_path/SOAPSanityObjects.pm: $!";
+print $fh "package ${PACKAGE_PREFIX}::SOAPSanityObjects;\nuse strict;\n\n$module_use_statement\n1;\n";
+close $fh;
+print "created $save_path/SOAPSanityObjects.pm\n";
+
+sub create_type_module
+{
+    my ($type) = @_;
+    
+    my $type_name = $type->{name};
+    my $fields = $type->{fields};
+    
+    my $extra_subs = "";
+    
+    my $module = "package $PACKAGE_PREFIX::$type_name;\n";
+    $module .= "use Moo;\n";
+    $module .= "extends 'SOAP::Sanity::Type';\n\n";
+    
+    $module .= "# this is an auto-generated class and should not be edited by hand\n";
+    $module .= "# you should re-run wsdl2perl.pl if the WSDL has changed\n\n";
+    
+    foreach my $field (@$fields)
+    {
+        my $field_name = $field->{name};
+        my $field_type = $field->{type};
+        my $min_occurs = $field->{min_occurs};
+        my $max_occurs = $field->{max_occurs};
+        my $nillable = $field->{nillable};
+        
+        $module .= "# type: $field_type, min_occurs: $min_occurs, max_occurs: $max_occurs, nillable: $nillable\n";
+        
+        if (( $max_occurs > 1 ) || ( $max_occurs eq 'unbounded' ))
+        {
+            $module .= "has $field_name => ( is => 'ro', default => sub { [] } );\n";
+            
+            $extra_subs .= "sub add_$field_name\n{\n";
+            $extra_subs .= $TAB . "my (\$self, \$value) = \@_;\n";
+            $extra_subs .= $TAB . "push(\@{ \$self->$field_name }, \$value);\n";
+            $extra_subs .= "}\n";
+        }
+        else
+        {
+            $module .= "has $field_name => ( is => 'rw' );\n";
+        }
+    }
+    
+    $module .= "\n$extra_subs\n" if $extra_subs;
+    
+    $module .= "\nsub _serialize\n";
+    $module .= "{\n";
+    $module .= $TAB . 'my ($self, $dom, $parent_node) = @_;' . "\n\n";
+    $module .= $TAB . 'my $type_node = $dom->createElement("'. $type_name . '");' . "\n";
+    $module .= $TAB . '$parent_node->appendChild($type_node);' . "\n\n";
+    foreach my $field (@$fields)
+    {
+        my $field_name = $field->{name};
+        my $field_type = $field->{type};
+        my $min_occurs = $field->{min_occurs};
+        my $max_occurs = $field->{max_occurs};
+        my $nillable = $field->{nillable};
+        
+        my $is_array = ( ( $max_occurs > 1 ) || ( $max_occurs eq 'unbounded' ) ) ? 1 : 0;
+        my $is_complex = $TYPES{$field_type} ? 1 : 0;
+        
+        $module .= $TAB . '$self->_append_field($dom, $type_node, \'' . $field_name . '\', ' . $is_array .', '. $is_complex .', '. $nillable .', '. $min_occurs . ');' . "\n";
+    }
+    $module .= "\n";
+    $module .= $TAB . 'return $type_node;' . "\n";
+    $module .= "}\n";
+    
+    $module .= "\n1;\n";
+    
+    # load the module into memory
+    eval $module;
+    die "$module\n\nthe dymamically generated code for $PACKAGE_PREFIX::$type_name did not compile: $@" if $@;
+    eval "use $PACKAGE_PREFIX::$type_name; 1;";
+    die "$module\n\nthe dymamically generated code for $PACKAGE_PREFIX::$type_name could not be use'd: $@" if $@;
+    
+    open(my $fh, ">", "$save_path/$type_name.pm") or die "cannot create $save_path/$type_name.pm: $!";
+    print $fh $module;
+    close $fh;
+    print "created $save_path/$type_name.pm\n";
+    
+    return ("$PACKAGE_PREFIX::$type_name", "$save_path/$type_name.pm");
+}
+
+print "\n";
+print "**********************************************************************\n";
+print "CREATING SERVICE\n";
+print "**********************************************************************\n";
+
+my $service = "package $PACKAGE_PREFIX;\n";
+$service .= "use Moo;\n";
+$service .= "extends 'SOAP::Sanity::Service';\n\n";
+$service .= "use ${PACKAGE_PREFIX}::SOAPSanityObjects;\n\n";
+
+$service .= "has endpoint => ( is => 'ro', default => sub { '" . $service_uri . "' } );\n";
+
+$service .= "\n=head1 NAME $PACKAGE_PREFIX\n\nThis is a client module to a SOAP API.\n\n=cut\n";
+$service .= "\n=head1 SYNOPSIS\n\n";
+$service .= "  use $PACKAGE_PREFIX;\n";
+$service .= "  my \$service = $PACKAGE_PREFIX->new();\n";
+$service .= "\n=cut\n\n";
+
+$service .= "=head1 METHODS\n";
+foreach my $method_name ( keys %METHODS )
+{
+    my $input = $METHODS{$method_name}->{input};
+    my $output = $METHODS{$method_name}->{output};
+    
+    $service .= "\n=head2 $method_name\n\n";
+    $service .= "input: $input, output: $output\n\n";
+    
+    if ($TYPES{$input})
+    {
+        add_object_creation_pod(\$service, $TYPES{$input});
+    }
+    else
+    {
+        # TODO non complex types?
+    }
+    
+    $service .= $TAB . '# returns a ' . $PACKAGE_PREFIX . '::' . $output . ' object' . "\n";
+    $service .= $TAB . 'my $' . $output . ' = $service->' . $method_name . '($' . $input . ');' . "\n";
+    
+    $service .= "\n=cut\n";
+    
+    $service .= "sub $method_name\n";
+    $service .= "{\n";
+    $service .= $TAB . 'my ($self, @args) = @_;' . "\n";
+    $service .= $TAB . 'return $self->make_request(\'' . $method_name . '\', @args);' . "\n";
+    $service .= "}\n";
+}
+$service .= "\n1;\n";
+
+open(my $fh, ">", "$save_path.pm") or die "cannot create $save_path.pm: $!";
+print $fh $service;
+close $fh;
+print "created $save_path.pm\n";
+
+sub add_object_creation_pod
+{
+    my ($textref, $type, $parent_variable_name, $parent_accessor_name) = @_;
+    
+    my $type_name = $type->{name};
+    my $fields = $type->{fields};
+    
+    my @recurse_these;
+    
+    $$textref .= $TAB . 'my $' . $type_name . ' = ' . ${PACKAGE_PREFIX} . '::' . $type_name . '->new(' . "\n";
+    
+    foreach my $field (@$fields)
+    {
+        my $field_name = $field->{name};
+        my $field_type = $field->{type};
+        my $min_occurs = $field->{min_occurs};
+        my $max_occurs = $field->{max_occurs};
+        my $nillable = $field->{nillable};
+        
+        if ($TYPES{$field_type})
+        {
+            my $is_array = ( ( $max_occurs > 1 ) || ( $max_occurs eq 'unbounded' ) ) ? 1 : 0;
+            
+            push(@recurse_these, { type => $TYPES{$field_type}, field_name => $field_name, is_array => $is_array });
+        }
+        else
+        {
+            $$textref .= "$TAB$TAB" . $field_name . ' => "", # ' . "type: $field_type, nillable: $nillable, min_occurs: $min_occurs\n";
+        }
+    }
+    
+    $$textref .= $TAB . ');' . "\n";
+    
+    if ($parent_variable_name)
+    {
+        $$textref .= $TAB . $parent_variable_name . '->' . $parent_accessor_name . '($' . $type_name . ');' . "\n";
+    }
+    
+    $$textref .= "\n";
+    
+    foreach my $recurse_ref (@recurse_these)
+    {
+        my $new_parent_accessor_name;
+        
+        if ($recurse_ref->{is_array})
+        {
+            # this field is an array so call the add_* method on it
+            $new_parent_accessor_name = 'add_' . $recurse_ref->{field_name};
+        }
+        else
+        {
+            $new_parent_accessor_name = $recurse_ref->{field_name};
+        }
+        
+        add_object_creation_pod($textref, $recurse_ref->{type}, "\$$type_name", $new_parent_accessor_name);
+    }
+    
+    return;
+}
 
 sub remove_namespace
 {
