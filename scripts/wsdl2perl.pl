@@ -49,8 +49,9 @@ if ($soap12_namespace)
 # remove namespaces to make parsing easier
 # also, this will work with broken wsld files that do not declare namespaces correctly
 # yea, this is a hack...
-$wsdl_string =~ s{( < (?:\s*/\s*)? ) \w+\: (\w+)}{$1$2}xg;
-$wsdl_string =~ s{ \s \w+: (\w+=")  }{ $1}xg;
+$wsdl_string =~ s{<definitions[^>]+>}{<definitions>}xms;
+$wsdl_string =~ s{( < (?:\s*/\s*)? ) \w+\: ([\w\-]+)}{$1$2}xg;
+$wsdl_string =~ s{ \s \w+: ([\w\-]+=")  }{ $1}xg;
 
 my $wsdl_dom = XML::LibXML->load_xml(
     string => (\$wsdl_string),
@@ -61,14 +62,21 @@ my $wsdl_root = $wsdl_dom->documentElement;
 unless ($PACKAGE_PREFIX)
 {
     my $name = $wsdl_root->findvalue('//service/@name');
-    die "cannot find the service name in the WSDL, you must pass --package_prefix for this service" unless $name;
+    die "$wsdl_string\n\ncannot find the service name in the WSDL, you must pass --package_prefix for this service" unless $name;
     $PACKAGE_PREFIX = 'SOAP::Sanity::' . $name;
 }
 $PACKAGE_PREFIX =~ s/::$//;
 print "package prefix will be: $PACKAGE_PREFIX\n";
 
-my $TARGET_NAMESPACE = $wsdl_root->findvalue('@targetNamespace');
+# TODO attach the namespace to the types since there could be multiple schemas
+my $TARGET_NAMESPACE = $wsdl_root->findvalue('//schema/@targetNamespace');
 die "cannot find target namespace in WSDL root node" unless $TARGET_NAMESPACE;
+
+my $BINDING = lc( $wsdl_root->findvalue('//binding/binding/@style') || "" );
+unless ($BINDING eq 'rpc' || $BINDING eq 'document')
+{
+    die "this script currently only supports the rpc and document binding types";
+}
 
 # remove root attributes...LibXML is finicky
 $wsdl_string =~ s{(<\w+) [^>]+}{$1};
@@ -95,11 +103,38 @@ my $service_uri = $wsdl_root->findvalue('service/port/address/@location');
 die "cannot determine service uri" unless $service_uri;
 print "service is at: $service_uri\n";
 
-my %TYPES;
+my %MESSAGES;
+my %COMPLEX_TYPES;
+my %SIMPLE_TYPES;
 my %METHODS;
 
 #
-# Load types
+# Load messages
+#
+foreach my $message_node ( $wsdl_root->findnodes('//message') )
+{
+    my $message_name = remove_namespace( $message_node->findvalue('@name') );
+    die "missing name in message node: $message_node" unless $message_name;
+    
+    my @parts;
+    foreach my $part ( $message_node->findnodes('part') )
+    {
+        my $part_name = remove_namespace( $part->findvalue('@name') );
+        my $element = remove_namespace( $part->findvalue('@element') );
+        my $type = remove_namespace( $part->findvalue('@type') );
+        
+        push(@parts, {
+            name => $part_name,
+            element => $element,
+            type => $type,
+        });
+    }
+    
+    $MESSAGES{$message_name} = \@parts;
+}
+
+#
+# Load types...the complex ones will become objects
 #
 my @types_nodes = $wsdl_root->findnodes('types');
 die "cannot load types" unless @types_nodes;
@@ -110,7 +145,6 @@ foreach my $type_node (@types_nodes)
     SCHEMA_NODES: foreach my $schema_node ( $type_node->findnodes('schema') )
     {
         my $target_namespace = $schema_node->getAttribute('targetNamespace');
-        
         print "found schema with a target namespace of: $target_namespace\n";
         
         TYPE_NODES: foreach my $type_node ( $schema_node->findnodes('./*') )
@@ -146,21 +180,223 @@ foreach my $type_node (@types_nodes)
                 next TYPE_NODES;
             }
             
-            my $fields = parse_type($type_node);
-            
-            die "$name type already exists!: " . Dumper($TYPES{$name}) if $TYPES{$name};
-            
-            $TYPES{$name} = {
-                name => $name,
-                fields => $fields,
-            };
-            
-            print Dumper($TYPES{$name}) . "\n";
+            if ($node_name eq 'simpleType')
+            {
+                die "$name simple type already exists!: " . Dumper($SIMPLE_TYPES{$name}) if $SIMPLE_TYPES{$name};
+                
+                warn "found simpleType: $name";
+                
+                my $base_type = remove_namespace( $type_node->findvalue('restriction/@base') );
+                $base_type = $type unless ($base_type);
+                
+                my %enum;
+                my @enum_nodes = $type_node->findnodes('restriction/enumeration');
+                if (@enum_nodes)
+                {
+                    my @enum;
+                    foreach my $enum_node (@enum_nodes)
+                    {
+                        push(@enum, $enum_node->findvalue('@value'));
+                    }
+                    %enum = ( enum => \@enum );
+                }
+                
+                $SIMPLE_TYPES{$name} = {
+                    type => $base_type,
+                    %enum,
+                };
+            }
+            else
+            {
+                die "$name complex type already exists!: " . Dumper($COMPLEX_TYPES{$name}) if $COMPLEX_TYPES{$name};
+                
+                my $fields = parse_complex_type($type_node);
+                
+                $COMPLEX_TYPES{$name} = {
+                    name => $name,
+                    fields => $fields,
+                };
+
+                print Dumper($COMPLEX_TYPES{$name}) . "\n";
+            }
         }
     }
 }
 
-sub parse_type
+#
+# Load ports (operations)
+#
+foreach my $port_type_node ( $wsdl_root->findnodes('portType') )
+{
+    my $name = $port_type_node->getAttribute('name');
+    
+    print "\n";
+    print "**********************************************************************\n";
+    print "PARSING PORT: $name\n";
+    print "**********************************************************************\n";
+    
+    foreach my $operation_node ( $port_type_node->findnodes('operation') )
+    {
+        my $name = $operation_node->getAttribute('name');
+        my $input_message_name = remove_namespace( $operation_node->findvalue('input/@message') );
+        my $output_message_name = remove_namespace( $operation_node->findvalue('output/@message') );
+        my $documentation = $operation_node->findvalue('documentation');
+        
+        print "\tfound method: $name\n\t\tinput: $input_message_name\n\t\toutput: $output_message_name\n";
+        
+        $METHODS{$name} = {
+            input_message_name => $input_message_name,
+            input_parts => $MESSAGES{$input_message_name},
+            output_message_name => $output_message_name,
+            output_parts => $MESSAGES{$output_message_name},
+            documentation => $documentation,
+        };
+    }
+}
+
+print "\n";
+print "**********************************************************************\n";
+print "CREATING MODULES\n";
+print "**********************************************************************\n";
+
+my $save_path = $SAVE_DIR . '/lib/' . join( '/', split(/::/, $PACKAGE_PREFIX) );
+print "save path: $save_path\n";
+make_path($save_path);
+
+my $module_use_statement = "";
+foreach my $type ( sort { $a->{name} cmp $b->{name} } values %COMPLEX_TYPES )
+{
+    my ($module_name, $module_path) = create_type_module($type);
+    $module_use_statement .= "use $module_name;\n";
+}
+
+open(my $fh, ">", "$save_path/SOAPSanityObjects.pm") or die "cannot create $save_path/SOAPSanityObjects.pm: $!";
+print $fh "package ${PACKAGE_PREFIX}::SOAPSanityObjects;\nuse strict;\n\n$module_use_statement\n1;\n";
+close $fh;
+print "created $save_path/SOAPSanityObjects.pm\n";
+
+print "\n";
+print "**********************************************************************\n";
+print "CREATING SERVICE\n";
+print "**********************************************************************\n";
+my $service_module_name = $PACKAGE_PREFIX . 'Client';
+my $service = "package $service_module_name;\n";
+$service .= "use Moo;\n";
+$service .= "extends 'SOAP::Sanity::Service';\n\n";
+$service .= "use ${PACKAGE_PREFIX}::SOAPSanityObjects;\n\n";
+
+$service .= "has service_uri => ( is => 'ro', default => sub { '" . $service_uri . "' } );\n";
+$service .= "has target_namespace => ( is => 'ro', default => sub { '" . $TARGET_NAMESPACE . "' } );\n";
+$service .= "has binding => ( is => 'ro', default => sub { '" . $BINDING . "' } );\n";
+
+$service .= "\n=head1 NAME $service_module_name\n\nThis is an auto-generated client module to a SOAP API.\n\n=cut\n";
+$service .= "\n=head1 SYNOPSIS\n\n";
+$service .= "  use $service_module_name;\n";
+$service .= "  my \$service = $service_module_name->new();\n";
+$service .= "\n=cut\n\n";
+
+my $service_documentation = $wsdl_root->findvalue('//service/documentation');
+if ($service_documentation)
+{
+    $service_documentation =~ s{^\s*}{}gm;
+    
+    $service .= "=head1 SERVICE DOCUMENTATION\n\n";
+    $service .= "$service_documentation\n";
+    $service .= "\n=cut\n\n";
+}
+
+$service .= "=head1 METHODS\n";
+foreach my $method_name ( keys %METHODS )
+{
+    my $method = $METHODS{$method_name};
+    my $input = $method->{input_message_name};
+    my $output = $method->{output_message_name};
+    my $documentation = $method->{documentation};
+    
+    $service .= "\n=head2 $method_name\n\n";
+    
+    # add the docs from the WSDL, if provided
+    if ($documentation)
+    {
+        $service .= "$documentation\n\n";
+    }
+    
+    foreach my $part (@{ $method->{input_parts} })
+    {
+        my $part_name = $part->{name};
+        my $part_type = $part->{type} || $part->{element};
+        
+        # complex type
+        if ($COMPLEX_TYPES{$part_type})
+        {
+            add_object_creation_pod(\$service, $COMPLEX_TYPES{$part_type});
+        }
+        # simple type?
+        else
+        {
+            $service .= "$part_name: $part_type   -WAT\n\n";
+        }
+    }
+    
+    my $part_order = "";
+    
+    $service .= $TAB . '# returns a ' . $PACKAGE_PREFIX . '::' . $output . ' object' . "\n";
+    $service .= $TAB . 'my $' . $output . ' = $service->' . $method_name . '(' . "\n";
+    foreach my $part (@{ $method->{input_parts} })
+    {
+        my $part_name = $part->{name};
+        my $part_type = $part->{type} || $part->{element};
+        
+        my $variable_name;
+        if ($COMPLEX_TYPES{$part_type})
+        {
+            $variable_name = "\$$part_type,";
+        }
+        else
+        {
+            my $simple_type_comment = "";
+            if (my $simple_type = $SIMPLE_TYPES{$part_type})
+            {
+                my $type = $simple_type->{type};
+                $simple_type_comment .= "$type";
+                
+                if (my $enum = $simple_type->{enum})
+                {
+                    $simple_type_comment .= ' - allowed values: "' . join('", "', @$enum) . '"';
+                }
+            }
+            else
+            {
+                $simple_type_comment = $part_type
+            }
+            
+            $variable_name = "\"\", # $simple_type_comment";
+        }
+        
+        $service .= "$TAB$TAB" . $part_name . ' => ' . $variable_name . "\n";
+        
+        $part_order .= "$part_name ";
+    }
+    $service .= $TAB . ");\n";
+    
+    $service .= "\n=cut\n\n";
+    
+    $service .= "sub $method_name\n";
+    $service .= "{\n";
+    $service .= $TAB . 'my ($self, %args) = @_;' . "\n";
+    $service .= $TAB . 'my @order = qw( ' . $part_order . ");\n";
+    $service .= $TAB . 'return $self->_make_request(\'' . $method_name . '\', \@order, %args);' . "\n";
+    $service .= "}\n";
+}
+$service .= "\n1;\n";
+
+my $service_file_name = $save_path . 'Client.pm';
+open(my $fh, ">", "$service_file_name") or die "cannot create $service_file_name: $!";
+print $fh $service;
+close $fh;
+print "created $service_file_name\n";
+
+sub parse_complex_type
 {
     my ($type_node) = @_;
     
@@ -177,7 +413,7 @@ sub parse_type
     
     if ($type)
     {
-        push(@fields, parse_field($type_node));
+        push(@fields, parse_element($type_node));
     }
     else
     {
@@ -186,7 +422,7 @@ sub parse_type
             my $node_name = $node->nodeName;
             print "Parsing node: $node_name\n";
 
-            if ( $node_name eq 'sequence' )
+            if ( $node_name eq 'sequence' || $node_name eq 'all' )
             {
                 push(@fields, parse_sequence($node));
             }
@@ -202,7 +438,7 @@ sub parse_type
                         if ($base_node)
                         {
                             print "Loaded fields from the base type \"$base_name\":\n";
-                            my ($base_sequence) = $base_node->findnodes('sequence');
+                            my ($base_sequence) = $base_node->findnodes('sequence|all');
                             push(@fields, parse_sequence($base_sequence));
                         }
                         else
@@ -211,7 +447,7 @@ sub parse_type
                         }
                         
                         print "Extending \"$base_name\" type with these fields:\n";
-                        my ($additional_sequence) = $extension_node->findnodes('sequence');
+                        my ($additional_sequence) = $extension_node->findnodes('sequence|all');
                         push(@fields, parse_sequence($additional_sequence));
                     }
                 }
@@ -236,13 +472,13 @@ sub parse_sequence
     
     foreach my $element_node ( $sequence_node->findnodes('element') )
     {
-        push(@fields, parse_field($element_node));
+        push(@fields, parse_element($element_node));
     }
     
     return @fields;
 }
 
-sub parse_field
+sub parse_element
 {
     my ($element_node) = @_;
     
@@ -260,68 +496,6 @@ sub parse_field
     
     return $field;
 }
-
-#
-# Load ports (operations)
-#
-foreach my $port_type_node ( $wsdl_root->findnodes('portType') )
-{
-    my $name = $port_type_node->getAttribute('name');
-    
-    print "\n";
-    print "**********************************************************************\n";
-    print "PARSING PORT: $name\n";
-    print "**********************************************************************\n";
-    
-    foreach my $operation_node ( $port_type_node->findnodes('operation') )
-    {
-        my $name = $operation_node->getAttribute('name');
-        
-        my $input = remove_namespace( $operation_node->findvalue('input/@message') );
-        # TODO can there be multiple parts?
-        my ($input_type) = remove_namespace( $wsdl_root->findvalue(q|//message[@name='| . $input . q|']/part/@element|) );
-        unless ($input_type)
-        {
-            ($input_type) = remove_namespace( $wsdl_root->findvalue(q|//message[@name='| . $input . q|']/part/@type|) );
-        }
-        
-        my $output = remove_namespace( $operation_node->findvalue('output/@message') );
-        # TODO can there be multiple parts?
-        my ($output_type) = remove_namespace( $wsdl_root->findvalue(q|//message[@name='| . $output . q|']/part/@element|) );
-        unless ($output_type)
-        {
-            ($output_type) = remove_namespace( $wsdl_root->findvalue(q|//message[@name='| . $output . q|']/part/@type|) );
-        }
-        
-        print "\tfound method: $name\n\t\tinput: $input_type (message: $input)\n\t\toutput: $output_type (message: $output)\n";
-    
-        $METHODS{$name} = {
-            input => ($input_type || $input),
-            output => ($output_type || $output),
-        };
-    }
-}
-
-print "\n";
-print "**********************************************************************\n";
-print "CREATING MODULES\n";
-print "**********************************************************************\n";
-
-my $save_path = $SAVE_DIR . '/lib/' . join( '/', split(/::/, $PACKAGE_PREFIX) );
-print "save path: $save_path\n";
-make_path($save_path);
-
-my $module_use_statement = "";
-foreach my $type ( sort { $a->{name} cmp $b->{name} } values %TYPES )
-{
-    my ($module_name, $module_path) = create_type_module($type);
-    $module_use_statement .= "use $module_name;\n";
-}
-
-open(my $fh, ">", "$save_path/SOAPSanityObjects.pm") or die "cannot create $save_path/SOAPSanityObjects.pm: $!";
-print $fh "package ${PACKAGE_PREFIX}::SOAPSanityObjects;\nuse strict;\n\n$module_use_statement\n1;\n";
-close $fh;
-print "created $save_path/SOAPSanityObjects.pm\n";
 
 sub create_type_module
 {
@@ -368,8 +542,12 @@ sub create_type_module
     
     $module .= "\nsub _serialize\n";
     $module .= "{\n";
-    $module .= $TAB . 'my ($self, $dom, $parent_node) = @_;' . "\n\n";
-    $module .= $TAB . 'my $type_node = $dom->createElement("'. $type_name . '");' . "\n";
+    $module .= $TAB . 'my ($self, $dom, $parent_node, $field_name) = @_;' . "\n\n";
+    # the first element in the body will not get the $field_name passed in, so default to the type name
+    # ...which is actually the method name (document binding is weird)
+    # TODO the ||= is a bit ugly here, it would be better if the Type objects knew if they were a root/operation element
+    $module .= $TAB . '$field_name ||= ' . "'$type_name';\n";
+    $module .= $TAB . 'my $type_node = $dom->createElement("m:$field_name");' . "\n";
     $module .= $TAB . '$parent_node->appendChild($type_node);' . "\n\n";
     foreach my $field (@$fields)
     {
@@ -380,7 +558,7 @@ sub create_type_module
         my $nillable = $field->{nillable};
         
         my $is_array = ( ( $max_occurs > 1 ) || ( $max_occurs eq 'unbounded' ) ) ? 1 : 0;
-        my $is_complex = $TYPES{$field_type} ? 1 : 0;
+        my $is_complex = $COMPLEX_TYPES{$field_type} ? 1 : 0;
         
         $module .= $TAB . '$self->_append_field($dom, $type_node, \'' . $field_name . '\', ' . $is_array .', '. $is_complex .', '. $nillable .', '. $min_occurs . ');' . "\n";
     }
@@ -404,62 +582,6 @@ sub create_type_module
     return ("$PACKAGE_PREFIX::$type_name", "$save_path/$type_name.pm");
 }
 
-print "\n";
-print "**********************************************************************\n";
-print "CREATING SERVICE\n";
-print "**********************************************************************\n";
-my $service_module_name = $PACKAGE_PREFIX . 'Client';
-my $service = "package $service_module_name;\n";
-$service .= "use Moo;\n";
-$service .= "extends 'SOAP::Sanity::Service';\n\n";
-$service .= "use ${PACKAGE_PREFIX}::SOAPSanityObjects;\n\n";
-
-$service .= "has service_uri => ( is => 'ro', default => sub { '" . $service_uri . "' } );\n";
-$service .= "has target_namespace => ( is => 'ro', default => sub { '" . $TARGET_NAMESPACE . "' } );\n";
-
-$service .= "\n=head1 NAME $service_module_name\n\nThis is a client module to a SOAP API.\n\n=cut\n";
-$service .= "\n=head1 SYNOPSIS\n\n";
-$service .= "  use $service_module_name;\n";
-$service .= "  my \$service = $service_module_name->new();\n";
-$service .= "\n=cut\n\n";
-
-$service .= "=head1 METHODS\n";
-foreach my $method_name ( keys %METHODS )
-{
-    my $input = $METHODS{$method_name}->{input};
-    my $output = $METHODS{$method_name}->{output};
-    
-    $service .= "\n=head2 $method_name\n\n";
-    $service .= "input: $input, output: $output\n\n";
-    
-    if ($TYPES{$input})
-    {
-        add_object_creation_pod(\$service, $TYPES{$input});
-    }
-    else
-    {
-        # TODO non complex types?
-    }
-    
-    $service .= $TAB . '# returns a ' . $PACKAGE_PREFIX . '::' . $output . ' object' . "\n";
-    $service .= $TAB . 'my $' . $output . ' = $service->' . $method_name . '($' . $input . ');' . "\n";
-    
-    $service .= "\n=cut\n\n";
-    
-    $service .= "sub $method_name\n";
-    $service .= "{\n";
-    $service .= $TAB . 'my ($self, @args) = @_;' . "\n";
-    $service .= $TAB . 'return $self->_make_request(\'' . $method_name . '\', @args);' . "\n";
-    $service .= "}\n";
-}
-$service .= "\n1;\n";
-
-my $service_file_name = $save_path . 'Client.pm';
-open(my $fh, ">", "$service_file_name") or die "cannot create $service_file_name: $!";
-print $fh $service;
-close $fh;
-print "created $service_file_name\n";
-
 sub add_object_creation_pod
 {
     my ($textref, $type, $parent_variable_name, $parent_accessor_name) = @_;
@@ -479,11 +601,11 @@ sub add_object_creation_pod
         my $max_occurs = $field->{max_occurs};
         my $nillable = $field->{nillable};
         
-        if ($TYPES{$field_type})
+        if ($COMPLEX_TYPES{$field_type})
         {
             my $is_array = ( ( $max_occurs > 1 ) || ( $max_occurs eq 'unbounded' ) ) ? 1 : 0;
             
-            push(@recurse_these, { type => $TYPES{$field_type}, field_name => $field_name, is_array => $is_array });
+            push(@recurse_these, { type => $COMPLEX_TYPES{$field_type}, field_name => $field_name, is_array => $is_array });
         }
         else
         {
@@ -527,10 +649,3 @@ sub remove_namespace
     $name =~ s/^\w+://;
     return $name;
 }
-
-# sub get_children
-# {
-#     my ($parent_node, $child_name) = @_;
-#     my $children = $parent_node->findnodes($child_name);
-#     return wantarray ? @$children : $children;
-# }
