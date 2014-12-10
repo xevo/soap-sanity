@@ -1,4 +1,4 @@
-use 5.006;
+use 5.008;
 use strict;
 use warnings FATAL => 'all';
 use ExtUtils::MakeMaker;
@@ -8,9 +8,9 @@ WriteMakefile(
     AUTHOR           => q{Ken Prows <perl@xev.net>},
     VERSION_FROM     => 'lib/SOAP/Sanity.pm',
     ABSTRACT_FROM    => 'lib/SOAP/Sanity.pm',
-    LICENSE          => 'Artistic_2_0',
+    LICENSE          => 'Perl5',
     PL_FILES         => {},
-    MIN_PERL_VERSION => 5.006,
+    MIN_PERL_VERSION => 5.008,
     CONFIGURE_REQUIRES => {
         'ExtUtils::MakeMaker' => 0,
     },
@@ -18,8 +18,11 @@ WriteMakefile(
         'Test::More' => 0,
     },
     PREREQ_PM => {
-        #'ABC'              => 1.6,
-        #'Foo::Bar::Module' => 5.0401,
+        'Moo' => 0,
+        'LWP::UserAgent' => 0,
+        'XML::LibXML' => 0,
+        'Scalar::Util' => 0,
+        'Data::Dumper' => 0,
     },
     dist  => { COMPRESS => 'gzip -9f', SUFFIX => 'gz', },
     clean => { FILES => 'SOAP-Sanity-*' },

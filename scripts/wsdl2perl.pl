@@ -1,14 +1,58 @@
 #!/usr/bin/env perl
 use strict;
-
 use lib '../SOAP-Sanity/lib';
 
-use Data::Dumper;
-use LWP::Simple;
-use File::Slurp;
-use XML::LibXML;
-use URI;
+=head1 NAME
+
+wsdl2perl.pl
+
+=head1 SYNOPSIS
+
+Start by running this script, passing it the location of the WSDL:
+
+    wsdl2perl.pl --wsdl http://example.com/soap/wsdl
+
+The objects will be generated into a directory called lib,
+inside of your current working directory.
+
+You can then look at the auto generated client module's
+POD to see how to call each method in the API.
+
+The client module will be called something like:
+lib/SOAP/Sanity/SomeServiceClient.pm
+
+A more detailed description of each option is described in the
+OPTIONS section below.
+
+=head1 OPTIONS
+
+=over
+
+=item --wsdl
+
+The location of the WSDL.
+This can be either a URL or a local file path.
+
+=item --save_dir
+
+The directory to save the auto-generated modules to.
+Defaults to the current working directory.
+
+=item --package_prefix
+
+The package prefix for the auto-generated objects.
+Defaults to SOAP::Sanity::{WSDL Service Name}
+
+=back
+
+=cut
+
 use File::Path qw(make_path);
+use LWP::UserAgent;
+use XML::LibXML;
+use Data::Dumper;
+
+use SOAP::Sanity;
 
 my $TAB = '    ';
 
@@ -17,9 +61,9 @@ my $PACKAGE_PREFIX;
 my $WSDL_URI;
 use Getopt::Long;
 GetOptions(
+    "wsdl=s" => \$WSDL_URI,
     "save_dir=s" => \$SAVE_DIR,
     "package_prefix=s" => \$PACKAGE_PREFIX,
-    "wsdl=s" => \$WSDL_URI,
 );
 die "the --wsdl uri is required (can be a URL or a file path)" unless $WSDL_URI;
 
@@ -28,11 +72,24 @@ $SAVE_DIR =~ s/\/$//;
 my $wsdl_string;
 if ($WSDL_URI =~ /^http/)
 {
-    $wsdl_string = get($WSDL_URI);
+    my $agent = LWP::UserAgent->new( agent => "SOAP::Sanity $SOAP::Sanity::VERSION" );
+    my $response = $agent->get($WSDL_URI);
+    if ($response->is_success)
+    {
+        $wsdl_string = $response->decoded_content;
+    }
+    else
+    {
+        die 'Cannot download WSDL: ' . $response->status_line;
+    }
 }
 elsif (-f $WSDL_URI)
 {
-    $wsdl_string = read_file($WSDL_URI);
+    local $/ = undef;
+    open FILE, "$WSDL_URI" or die "Couldn't open WSDL file: $!";
+    binmode FILE;
+    $wsdl_string = <FILE>;
+    close FILE;
 }
 else
 {
@@ -71,12 +128,6 @@ print "package prefix will be: $PACKAGE_PREFIX\n";
 # TODO attach the namespace to the types since there could be multiple schemas
 my $TARGET_NAMESPACE = $wsdl_root->findvalue('//schema/@targetNamespace');
 die "cannot find target namespace in WSDL root node" unless $TARGET_NAMESPACE;
-
-my $BINDING = lc( $wsdl_root->findvalue('//binding/binding/@style') || "" );
-unless ($BINDING eq 'rpc' || $BINDING eq 'document')
-{
-    die "this script currently only supports the rpc and document binding types";
-}
 
 # remove root attributes...LibXML is finicky
 $wsdl_string =~ s{(<\w+) [^>]+}{$1};
@@ -241,8 +292,12 @@ foreach my $port_type_node ( $wsdl_root->findnodes('portType') )
         my $input_message_name = remove_namespace( $operation_node->findvalue('input/@message') );
         my $output_message_name = remove_namespace( $operation_node->findvalue('output/@message') );
         my $documentation = $operation_node->findvalue('documentation');
+        my $soap_action = $wsdl_root->findvalue('//binding/operation[@name=\'' . $name . '\']/operation/@soapAction');
+        my $binding = $wsdl_root->findvalue('//binding/operation[@name=\'' . $name . '\']/operation/@style');
         
-        print "\tfound method: $name\n\t\tinput: $input_message_name\n\t\toutput: $output_message_name\n";
+        die "no binding found for method: $name" unless $binding;
+        
+        print "\tfound method: $name\n\t\tinput: $input_message_name, binding: $binding, action: $soap_action\n\t\toutput: $output_message_name\n";
         
         $METHODS{$name} = {
             input_message_name => $input_message_name,
@@ -250,6 +305,8 @@ foreach my $port_type_node ( $wsdl_root->findnodes('portType') )
             output_message_name => $output_message_name,
             output_parts => $MESSAGES{$output_message_name},
             documentation => $documentation,
+            binding => $binding,
+            soap_action => $soap_action,
         };
     }
 }
@@ -287,37 +344,43 @@ $service .= "use ${PACKAGE_PREFIX}::SOAPSanityObjects;\n\n";
 
 $service .= "has service_uri => ( is => 'ro', default => sub { '" . $service_uri . "' } );\n";
 $service .= "has target_namespace => ( is => 'ro', default => sub { '" . $TARGET_NAMESPACE . "' } );\n";
-$service .= "has binding => ( is => 'ro', default => sub { '" . $BINDING . "' } );\n";
 
-$service .= "\n=head1 NAME $service_module_name\n\nThis is an auto-generated client module to a SOAP API.\n\n=cut\n";
+$service .= "\n=head1 NAME\n\n$service_module_name\n";
+$service .= "\n=head1 DESCRIPTION\n\n";
+$service .= "This is an auto-generated client module to a SOAP API.\n";
+$service .= "It should not be edited by hand.\n";
+$service .= "You should re-run wsdl2perl.pl if the WSDL has changed.\n";
 $service .= "\n=head1 SYNOPSIS\n\n";
 $service .= "  use $service_module_name;\n";
 $service .= "  my \$service = $service_module_name->new();\n";
-$service .= "\n=cut\n\n";
 
 my $service_documentation = $wsdl_root->findvalue('//service/documentation');
+# add the service docs from the WSDL, if provided
 if ($service_documentation)
 {
     $service_documentation =~ s{^\s*}{}gm;
     
-    $service .= "=head1 SERVICE DOCUMENTATION\n\n";
+    $service .= "\n=head1 SERVICE DOCUMENTATION\n\n";
     $service .= "$service_documentation\n";
-    $service .= "\n=cut\n\n";
 }
 
-$service .= "=head1 METHODS\n";
-foreach my $method_name ( keys %METHODS )
+$service .= "\n=head1 METHODS\n";
+foreach my $method_name ( sort keys %METHODS )
 {
     my $method = $METHODS{$method_name};
     my $input = $method->{input_message_name};
     my $output = $method->{output_message_name};
+    my $binding = $method->{binding};
+    my $soap_action = $method->{soap_action};
     my $documentation = $method->{documentation};
     
     $service .= "\n=head2 $method_name\n\n";
     
-    # add the docs from the WSDL, if provided
+    # add the method docs from the WSDL, if provided
     if ($documentation)
     {
+        $documentation =~ s{^\s*}{}gm;
+        
         $service .= "$documentation\n\n";
     }
     
@@ -329,7 +392,8 @@ foreach my $method_name ( keys %METHODS )
         # complex type
         if ($COMPLEX_TYPES{$part_type})
         {
-            add_object_creation_pod(\$service, $COMPLEX_TYPES{$part_type});
+            my $is_document_root = ( $method->{binding} eq 'document' ) ? 1 : 0;
+            add_object_creation_pod($is_document_root, \$service, $COMPLEX_TYPES{$part_type});
         }
         # simple type?
         else
@@ -342,41 +406,98 @@ foreach my $method_name ( keys %METHODS )
     
     $service .= $TAB . '# returns a ' . $PACKAGE_PREFIX . '::' . $output . ' object' . "\n";
     $service .= $TAB . 'my $' . $output . ' = $service->' . $method_name . '(' . "\n";
-    foreach my $part (@{ $method->{input_parts} })
+    
+    my $method_argument_parts;
+    if ($binding eq 'document')
     {
-        my $part_name = $part->{name};
-        my $part_type = $part->{type} || $part->{element};
-        
-        my $variable_name;
+        # the arguments to the method are actually the arguments to the first part
+        my $first_part = $method->{input_parts}->[0];
+        my $part_name = $first_part->{name};
+        my $part_type = $first_part->{type} || $first_part->{element};
         if ($COMPLEX_TYPES{$part_type})
         {
-            $variable_name = "\$$part_type,";
+            foreach my $field (@{ $COMPLEX_TYPES{$part_type}->{fields} })
+            {
+                my $field_name = $field->{name};
+                my $field_type = $field->{type};
+                my $min_occurs = $field->{min_occurs};
+                my $max_occurs = $field->{max_occurs};
+                my $nillable = $field->{nillable};
+                
+                my $variable_name;
+                if ($COMPLEX_TYPES{$field_type})
+                {
+                    $variable_name = "\$$field_name";
+                }
+                else
+                {
+                    my $simple_type_comment = "";
+                    if (my $simple_type = $SIMPLE_TYPES{$part_type})
+                    {
+                        my $type = $simple_type->{type};
+                        $simple_type_comment .= "$type";
+
+                        if (my $enum = $simple_type->{enum})
+                        {
+                            $simple_type_comment .= ' - allowed values: "' . join('", "', @$enum) . '"';
+                        }
+                    }
+                    else
+                    {
+                        $simple_type_comment = $part_type
+                    }
+
+                    $variable_name = "\"\", # $simple_type_comment";
+                }
+                
+                $service .= "$TAB$TAB" . $field_name . ' => ' . $variable_name . ",\n";
+            }
         }
+        # simple type?
         else
         {
-            my $simple_type_comment = "";
-            if (my $simple_type = $SIMPLE_TYPES{$part_type})
+            $service .= "$TAB$TAB" . $part_name . ' => "", # ' . $part_type . "\n";
+        }
+    }
+    else
+    {
+        foreach my $part (@{ $method->{input_parts} })
+        {
+            my $part_name = $part->{name};
+            my $part_type = $part->{type} || $part->{element};
+
+            my $variable_name;
+            if ($COMPLEX_TYPES{$part_type})
             {
-                my $type = $simple_type->{type};
-                $simple_type_comment .= "$type";
-                
-                if (my $enum = $simple_type->{enum})
-                {
-                    $simple_type_comment .= ' - allowed values: "' . join('", "', @$enum) . '"';
-                }
+                $variable_name = "\$$part_type,";
             }
             else
             {
-                $simple_type_comment = $part_type
+                my $simple_type_comment = "";
+                if (my $simple_type = $SIMPLE_TYPES{$part_type})
+                {
+                    my $type = $simple_type->{type};
+                    $simple_type_comment .= "$type";
+
+                    if (my $enum = $simple_type->{enum})
+                    {
+                        $simple_type_comment .= ' - allowed values: "' . join('", "', @$enum) . '"';
+                    }
+                }
+                else
+                {
+                    $simple_type_comment = $part_type
+                }
+
+                $variable_name = "\"\", # $simple_type_comment";
             }
-            
-            $variable_name = "\"\", # $simple_type_comment";
+
+            $service .= "$TAB$TAB" . $part_name . ' => ' . $variable_name . ",\n";
+
+            $part_order .= "$part_name ";
         }
-        
-        $service .= "$TAB$TAB" . $part_name . ' => ' . $variable_name . "\n";
-        
-        $part_order .= "$part_name ";
     }
+
     $service .= $TAB . ");\n";
     
     $service .= "\n=cut\n\n";
@@ -384,10 +505,25 @@ foreach my $method_name ( keys %METHODS )
     $service .= "sub $method_name\n";
     $service .= "{\n";
     $service .= $TAB . 'my ($self, %args) = @_;' . "\n";
-    $service .= $TAB . 'my @order = qw( ' . $part_order . ");\n";
-    $service .= $TAB . 'return $self->_make_request(\'' . $method_name . '\', \@order, %args);' . "\n";
+    if ( $method->{binding} eq 'document' )
+    {
+        my $message_part = $method->{input_parts}->[0];
+        my $part_name = $message_part->{name};
+        my $part_type = $message_part->{type} || $message_part->{element};
+        my $type = $COMPLEX_TYPES{$part_type};
+        my $type_name = $type->{name};
+        
+        $service .= $TAB . 'my $message = ' . ${PACKAGE_PREFIX} . '::' . $type_name . '->new(%args);' . "\n";
+        $service .= $TAB . 'return $self->_make_document_request($message);' . "\n";
+    }
+    else
+    {
+        $service .= $TAB . 'my @order = qw( ' . $part_order . ");\n";
+        $service .= $TAB . 'return $self->_make_rpc_request(\'' . $method_name . '\', \@order, %args);' . "\n";
+    }
     $service .= "}\n";
 }
+
 $service .= "\n1;\n";
 
 my $service_file_name = $save_path . 'Client.pm';
@@ -582,17 +718,22 @@ sub create_type_module
     return ("$PACKAGE_PREFIX::$type_name", "$save_path/$type_name.pm");
 }
 
+
+# $is_document_root will be true if the method has not recursed and it is document binding
+# 
 sub add_object_creation_pod
 {
-    my ($textref, $type, $parent_variable_name, $parent_accessor_name) = @_;
+    my ($is_document_root, $textref, $type, $parent_accessor_name, $parent_field_name, $parent_variable_name) = @_;
     
     my $type_name = $type->{name};
     my $fields = $type->{fields};
     
     my @recurse_these;
     
-    $$textref .= $TAB . 'my $' . $type_name . ' = ' . ${PACKAGE_PREFIX} . '::' . $type_name . '->new(' . "\n";
+    my $variable_name = $parent_field_name || $type_name;
     
+    $$textref .= $TAB . 'my $' . $variable_name . ' = ' . ${PACKAGE_PREFIX} . '::' . $type_name . '->new(' . "\n" unless $is_document_root;
+
     foreach my $field (@$fields)
     {
         my $field_name = $field->{name};
@@ -600,27 +741,27 @@ sub add_object_creation_pod
         my $min_occurs = $field->{min_occurs};
         my $max_occurs = $field->{max_occurs};
         my $nillable = $field->{nillable};
-        
+
         if ($COMPLEX_TYPES{$field_type})
         {
             my $is_array = ( ( $max_occurs > 1 ) || ( $max_occurs eq 'unbounded' ) ) ? 1 : 0;
-            
+
             push(@recurse_these, { type => $COMPLEX_TYPES{$field_type}, field_name => $field_name, is_array => $is_array });
         }
         else
         {
-            $$textref .= "$TAB$TAB" . $field_name . ' => "", # ' . "type: $field_type, nillable: $nillable, min_occurs: $min_occurs\n";
+            $$textref .= "$TAB$TAB" . $field_name . ' => "", # ' . "type: $field_type, nillable: $nillable, min_occurs: $min_occurs\n" unless $is_document_root;
         }
     }
-    
-    $$textref .= $TAB . ');' . "\n";
-    
+
+    $$textref .= $TAB . ');' . "\n" unless $is_document_root;
+
     if ($parent_variable_name)
     {
-        $$textref .= $TAB . $parent_variable_name . '->' . $parent_accessor_name . '($' . $type_name . ');' . "\n";
+        $$textref .= $TAB . '$' . $parent_variable_name . '->' . $parent_accessor_name . '($' . $variable_name . ');' . "\n" unless $is_document_root;
     }
-    
-    $$textref .= "\n";
+
+    $$textref .= "\n" unless $is_document_root;
     
     foreach my $recurse_ref (@recurse_these)
     {
@@ -636,7 +777,16 @@ sub add_object_creation_pod
             $new_parent_accessor_name = $recurse_ref->{field_name};
         }
         
-        add_object_creation_pod($textref, $recurse_ref->{type}, "\$$type_name", $new_parent_accessor_name);
+        if ($is_document_root)
+        {
+            # don't pass the $variable_name since the variable was not actually added to the pod
+            # ...it is created automatically for the user in the action sub
+            add_object_creation_pod(0, $textref, $recurse_ref->{type}, $new_parent_accessor_name, $recurse_ref->{field_name});
+        }
+        else
+        {
+            add_object_creation_pod(0, $textref, $recurse_ref->{type}, $new_parent_accessor_name, $recurse_ref->{field_name}, $variable_name);
+        }
     }
     
     return;
@@ -649,3 +799,17 @@ sub remove_namespace
     $name =~ s/^\w+://;
     return $name;
 }
+
+=head1 AUTHOR
+
+Ken Prows
+
+=head1 COPYRIGHT
+
+2014 Ken Prows
+
+=head1 LICENSE
+
+This program is free software; you can redistribute it and/or modify it under the same terms as Perl itself.
+
+=cut
