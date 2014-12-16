@@ -407,6 +407,7 @@ foreach my $method_name ( sort keys %METHODS )
     
     my $part_order = "";
     
+    # TODO actually the response is one object deep...for simplicity, the root object is not returned (for document binding)
     $service .= $TAB . '# returns a ' . $PACKAGE_PREFIX . '::' . $output . ' object' . "\n";
     $service .= $TAB . 'my $' . $output . ' = $service->' . $method_name . '(' . "\n";
     
