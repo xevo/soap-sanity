@@ -60,10 +60,7 @@ sub _make_document_request
     
     my $response = $self->agent->post($self->service_uri, Content => $request_xml);
     
-    my $response_content = $self->_post($request_xml);
-    
-    # TODO return SOAP object
-    return;
+    return $self->_post($request_xml);
 }
 
 #
@@ -129,10 +126,7 @@ sub _make_rpc_request
     
     my $response = $self->agent->post($self->service_uri, Content => $request_xml);
     
-    my $response_content = $self->_post($request_xml);
-    
-    # TODO return SOAP object
-    return;
+    return $self->_post($request_xml);
 }
 
 sub _post
@@ -145,9 +139,32 @@ sub _post
     my $response_content = $response->decoded_content;
     print "RESPONSE: $response_content\n\n";
     
+    my $response_dom;
+    
     if ($response->is_success)
     {
-         # TODO convert response to object
+         eval
+         {
+             $response_content =~ s{( < (?:\s*/\s*)? ) \w+\: (\w+)}{$1$2}xg;
+             $response_content =~ s{ \s \w+: (\w+=")  }{ $1}xg;
+
+             $response_dom = $self->parser->load_xml( string => $response_content );
+         };
+         if (my $error = $@)
+         {
+             if ( blessed($error) && $error->isa('SOAP::Sanity::Exception') )
+             {
+                 $error->rethrow;
+             }
+             else
+             {
+                 SOAP::Sanity::Exception->throw(
+                     error => "response was not valid XML: $error",
+                     http_response_code => $response->code,
+                     http_response_content => $response_content,
+                 );
+             }
+         }
     }
     elsif ($response->code == 500)
     {
@@ -156,7 +173,7 @@ sub _post
             $response_content =~ s{( < (?:\s*/\s*)? ) \w+\: (\w+)}{$1$2}xg;
             $response_content =~ s{ \s \w+: (\w+=")  }{ $1}xg;
             
-            my $response_dom = $self->parser->load_xml( string => $response_content );
+            $response_dom = $self->parser->load_xml( string => $response_content );
 
             my $response_node_name = $response_dom->documentElement->nodeName;
             
@@ -188,7 +205,7 @@ sub _post
             else
             {
                 SOAP::Sanity::Exception->throw(
-                    error => $response->status_line . " - $@",
+                    error => $response->status_line . " - $error",
                     http_response_code => $response->code,
                     http_response_content => $response_content,
                 );
@@ -204,7 +221,7 @@ sub _post
         );
     }
     
-    return $response_content;
+    return $response_dom->documentElement;
 }
 
 1;

@@ -10,7 +10,8 @@ wsdl2perl.pl
 
 Start by running this script, passing it the location of the WSDL:
 
-    wsdl2perl.pl --wsdl http://example.com/soap/wsdl
+    $ cd scripts
+    $ perl wsdl2perl.pl --wsdl http://example.com/path/to/wsdl
 
 The objects will be generated into a directory called lib,
 inside of your current working directory.
@@ -125,8 +126,8 @@ unless ($PACKAGE_PREFIX)
 $PACKAGE_PREFIX =~ s/::$//;
 print "package prefix will be: $PACKAGE_PREFIX\n";
 
-# TODO attach the namespace to the types since there could be multiple schemas
-my $TARGET_NAMESPACE = $wsdl_root->findvalue('//schema/@targetNamespace');
+# this should come from the root element
+my ($TARGET_NAMESPACE) = $wsdl_string =~ /targetNamespace="([^"]+)"/;
 die "cannot find target namespace in WSDL root node" unless $TARGET_NAMESPACE;
 
 # remove root attributes...LibXML is finicky
@@ -334,7 +335,7 @@ print "created $save_path/SOAPSanityObjects.pm\n";
 
 print "\n";
 print "**********************************************************************\n";
-print "CREATING SERVICE\n";
+print "CREATING CLIENT\n";
 print "**********************************************************************\n";
 my $service_module_name = $PACKAGE_PREFIX . 'Client';
 my $service = "package $service_module_name;\n";
@@ -367,6 +368,8 @@ if ($service_documentation)
 $service .= "\n=head1 METHODS\n";
 foreach my $method_name ( sort keys %METHODS )
 {
+    print "adding method: $method_name\n";
+    
     my $method = $METHODS{$method_name};
     my $input = $method->{input_message_name};
     my $output = $method->{output_message_name};
@@ -512,9 +515,12 @@ foreach my $method_name ( sort keys %METHODS )
         my $part_type = $message_part->{type} || $message_part->{element};
         my $type = $COMPLEX_TYPES{$part_type};
         my $type_name = $type->{name};
+        my $response_class = $PACKAGE_PREFIX . '::' . $output;
         
         $service .= $TAB . 'my $message = ' . ${PACKAGE_PREFIX} . '::' . $type_name . '->new(%args);' . "\n";
-        $service .= $TAB . 'return $self->_make_document_request($message);' . "\n";
+        $service .= $TAB . 'my $response_node = $self->_make_document_request($message);' . "\n";
+        $service .= $TAB . 'my $response_object = ' . $response_class . '->new();' . "\n";
+        $service .= $TAB . 'return $response_object->_unserialize($response_node->findnodes("Body/' . $output . '"));' . "\n";
     }
     else
     {
@@ -530,7 +536,9 @@ my $service_file_name = $save_path . 'Client.pm';
 open(my $fh, ">", "$service_file_name") or die "cannot create $service_file_name: $!";
 print $fh $service;
 close $fh;
-print "created $service_file_name\n";
+print "\ncreated $service_file_name\n";
+
+print "\nYou can now read the POD in the above client module for documentation on how to call each found method.\n\n";
 
 sub parse_complex_type
 {
@@ -700,6 +708,47 @@ sub create_type_module
     }
     $module .= "\n";
     $module .= $TAB . 'return $type_node;' . "\n";
+    $module .= "}\n";
+    
+    $module .= "\nsub _unserialize\n";
+    $module .= "{\n";
+    $module .= $TAB . 'my ($self, $node) = @_;' . "\n\n";
+    foreach my $field (@$fields)
+    {
+        my $field_name = $field->{name}; # the accessor name
+        my $field_type = $field->{type}; # will be the object class if this is a complex type
+        my $min_occurs = $field->{min_occurs};
+        my $max_occurs = $field->{max_occurs};
+        my $nillable = $field->{nillable};
+        my $is_array = ( ( $max_occurs > 1 ) || ( $max_occurs eq 'unbounded' ) ) ? 1 : 0;
+        
+        if ( $COMPLEX_TYPES{$field_type} )
+        {
+            if ($is_array)
+            {
+                $module .= $TAB . 'foreach my $node2 ( $node->findnodes("' . $field_name . '") )'. "\n";
+                $module .= $TAB . '{' . "\n";
+                $module .= "$TAB$TAB" . 'my $' . $field_name . ' = ' . "$PACKAGE_PREFIX::$field_type" . '->new();' . "\n";
+                $module .= "$TAB$TAB" . '$' . $field_name . '->_unserialize($node2);'. "\n";
+                $module .= "$TAB$TAB" . '$self->add_' . $field_name . '($' . $field_name . ');' . "\n";
+                $module .= $TAB . '}' . "\n";
+            }
+            else
+            {
+                $module .= "\n";
+                $module .= $TAB . 'my $' . $field_name . ' = ' . "$PACKAGE_PREFIX::$field_type" . '->new();' . "\n";
+                $module .= $TAB . '$' . $field_name . '->_unserialize( $node->findnodes("' . $field_name . '") );'. "\n";
+                $module .= $TAB . '$self->' . $field_name . '($' . $field_name . ');' . "\n";
+                $module .= "\n";
+            }
+        }
+        else
+        {
+            $module .= $TAB . '$self->' . $field_name . '( $node->findvalue("' . $field_name . '") );' . "\n";
+        }
+    }
+    $module .= "\n";
+    $module .= $TAB . 'return $self;' . "\n";
     $module .= "}\n";
     
     $module .= "\n1;\n";
