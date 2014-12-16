@@ -1,0 +1,18 @@
+This module uses its companion script, wsdl2perl.pl,
+to generate Moo based objects from a WSDL.
+
+Start by running the wsdl2perl.pl script, passing it the location of the WSDL:
+
+    $ cd scripts
+    $ perl wsdl2perl.pl --wsdl http://example.com/path/to/wsdl
+
+The objects will be generated into a directory called lib,
+inside of your current working directory.
+
+You can then look at the auto generated client module's
+POD to see how to call each method in the API.
+
+The client module will be called something like:
+lib/SOAP/Sanity/SomeServiceClient.pm
+
+You can find more detailed POD in the wsdl2perl.pl script.
