@@ -282,6 +282,8 @@ foreach my $port_type_node ( $wsdl_root->findnodes('portType') )
 {
     my $name = $port_type_node->getAttribute('name');
     
+    my $binding = $wsdl_root->findvalue('//binding/binding/@style');
+    
     print "\n";
     print "**********************************************************************\n";
     print "PARSING PORT: $name\n";
@@ -294,7 +296,7 @@ foreach my $port_type_node ( $wsdl_root->findnodes('portType') )
         my $output_message_name = remove_namespace( $operation_node->findvalue('output/@message') );
         my $documentation = $operation_node->findvalue('documentation');
         my $soap_action = $wsdl_root->findvalue('//binding/operation[@name=\'' . $name . '\']/operation/@soapAction');
-        my $binding = $wsdl_root->findvalue('//binding/operation[@name=\'' . $name . '\']/operation/@style');
+        my $binding = $wsdl_root->findvalue('//binding/operation[@name=\'' . $name . '\']/operation/@style') || $binding;
         
         die "no binding found for method: $name" unless $binding;
         
