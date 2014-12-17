@@ -619,7 +619,15 @@ sub parse_sequence
     
     foreach my $element_node ( $sequence_node->findnodes('element') )
     {
-        push(@fields, parse_element($element_node));
+        my $ref_name = remove_namespace( $element_node->getAttribute('ref') );
+        if ($ref_name)
+        {
+            # TODO re-load fields from ref type, then push onto fields
+        }
+        else
+        {
+            push(@fields, parse_element($element_node));
+        }
     }
     
     return @fields;
@@ -630,7 +638,6 @@ sub parse_element
     my ($element_node) = @_;
     
     my $field = {};
-
     $field->{name} = $element_node->getAttribute('name');
     $field->{type} = remove_namespace( $element_node->getAttribute('type') );
     $field->{min_occurs} = $element_node->getAttribute('minOccurs') || 1;
