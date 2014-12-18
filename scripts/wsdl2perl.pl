@@ -585,6 +585,12 @@ sub parse_complex_type
                         if ($base_node)
                         {
                             print "Loaded fields from the base type \"$base_name\":\n";
+                            
+                            # all - Specifies that the child elements can appear in any order. Each child element can occur 0 or 1 time
+                            # sequence - Specifies that the child elements must appear in a sequence. Each child element can occur from 0 to any number of times
+                            # For this parser's sake, it will treat them the same and always keep them in order.
+                            
+                            # TODO "choice" could be a parent
                             my ($base_sequence) = $base_node->findnodes('sequence|all');
                             push(@fields, parse_sequence($base_sequence));
                         }
@@ -594,6 +600,8 @@ sub parse_complex_type
                         }
                         
                         print "Extending \"$base_name\" type with these fields:\n";
+                        
+                        # TODO "choice" could be a parent
                         my ($additional_sequence) = $extension_node->findnodes('sequence|all');
                         push(@fields, parse_sequence($additional_sequence));
                     }
@@ -630,10 +638,20 @@ sub parse_sequence
                 # sometimes complex types are defined like: <element name="foo"><complexType>...
                 ($base_node) = $wsdl_root->findnodes(q|//element[@name='| . $base_name . q|']/complexType|);
             }
+            unless ($base_node)
+            {
+                # groups are defined like: <group name="foo"><sequence>...
+                ($base_node) = $wsdl_root->findnodes(q|//group[@name='| . $base_name . q|']|);
+            }
             
             if ($base_node)
             {
                 print "Loaded fields from the base type \"$base_name\":\n";
+                # all - Specifies that the child elements can appear in any order. Each child element can occur 0 or 1 time
+                # sequence - Specifies that the child elements must appear in a sequence. Each child element can occur from 0 to any number of times
+                # For this parser's sake, it will treat them the same and always keep them in order.
+                
+                # TODO "choice" could be a parent
                 my ($base_sequence) = $base_node->findnodes('sequence|all');
                 push(@fields, parse_sequence($base_sequence));
             }
