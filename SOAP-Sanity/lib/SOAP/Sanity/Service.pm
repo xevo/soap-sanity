@@ -58,7 +58,7 @@ sub _make_document_request
     
     my $request_xml = $dom->toString(1);
     
-    my $response = $self->agent->post($self->service_uri, Content => $request_xml);
+    my $response = $self->agent->post($self->service_uri, SOAPAction => 'http://ws.cdyne.com/WeatherWS/GetCityForecastByZIP', Content => $request_xml);
     
     return $self->_post($request_xml);
 }

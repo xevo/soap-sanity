@@ -518,12 +518,16 @@ foreach my $method_name ( sort keys %METHODS )
         my $part_type = $message_part->{type} || $message_part->{element};
         my $type = $COMPLEX_TYPES{$part_type};
         my $type_name = $type->{name};
+        
+        my $request_class = $PACKAGE_PREFIX . '::' . ($type->{name} || $method_name);
+        
         my $response_class = $PACKAGE_PREFIX . '::' . $output;
         
-        $service .= $TAB . 'my $message = ' . ${PACKAGE_PREFIX} . '::' . $type_name . '->new(%args);' . "\n";
+        $service .= $TAB . 'my $message = ' . $request_class . '->new(%args);' . "\n";
         $service .= $TAB . 'my $response_node = $self->_make_document_request($message);' . "\n";
         $service .= $TAB . 'my $response_object = ' . $response_class . '->new();' . "\n";
-        $service .= $TAB . 'return $response_object->_unserialize($response_node->findnodes("Body/' . $output . '"));' . "\n";
+        $service .= $TAB . '$response_object->_unserialize($response_node->findnodes("Body/' . $output . '"));' . "\n";
+        $service .= $TAB . 'return $response_object;' . "\n";
     }
     else
     {
@@ -755,6 +759,7 @@ sub create_type_module
     $module .= "\nsub _unserialize\n";
     $module .= "{\n";
     $module .= $TAB . 'my ($self, $node) = @_;' . "\n\n";
+    $module .= $TAB . 'return unless $node;' . "\n\n";
     foreach my $field (@$fields)
     {
         my $field_name = $field->{name}; # the accessor name
@@ -786,11 +791,21 @@ sub create_type_module
         }
         else
         {
-            $module .= $TAB . '$self->' . $field_name . '( $node->findvalue("' . $field_name . '") );' . "\n";
+            if ($is_array)
+            {
+                $module .= $TAB . 'foreach my $node2 ( $node->findnodes("' . $field_name . '") )'. "\n";
+                $module .= $TAB . '{' . "\n";
+                $module .= "$TAB$TAB" . '$self->add_' . $field_name . '($node2->textContent);' . "\n";
+                $module .= $TAB . '}' . "\n";
+            }
+            else
+            {
+                $module .= $TAB . '$self->' . $field_name . '( $node->findvalue("' . $field_name . '") );' . "\n";
+            }
         }
     }
     $module .= "\n";
-    $module .= $TAB . 'return $self;' . "\n";
+    $module .= $TAB . 'return;' . "\n";
     $module .= "}\n";
     
     $module .= "\n1;\n";
