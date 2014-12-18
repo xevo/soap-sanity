@@ -361,7 +361,7 @@ my $service_documentation = $wsdl_root->findvalue('//service/documentation');
 # add the service docs from the WSDL, if provided
 if ($service_documentation)
 {
-    $service_documentation =~ s{^\s*}{}gm;
+    #$service_documentation =~ s{^\s*}{}gm;
     
     $service .= "\n=head1 SERVICE DOCUMENTATION\n\n";
     $service .= "$service_documentation\n";
@@ -384,7 +384,7 @@ foreach my $method_name ( sort keys %METHODS )
     # add the method docs from the WSDL, if provided
     if ($documentation)
     {
-        $documentation =~ s{^\s*}{}gm;
+        #$documentation =~ s{^\s*}{}gm;
         
         $service .= "$documentation\n\n";
     }
@@ -560,7 +560,7 @@ sub parse_complex_type
     
     if ($type)
     {
-        push(@fields, parse_element($type_node));
+        push(@fields, parse_non_complex_element($type_node));
     }
     else
     {
@@ -619,21 +619,35 @@ sub parse_sequence
     
     foreach my $element_node ( $sequence_node->findnodes('element') )
     {
-        my $ref_name = remove_namespace( $element_node->getAttribute('ref') );
-        if ($ref_name)
+        # check to see if this references another element
+        # (think of a ref element as a perl parent, or base, class)
+        my $base_name = remove_namespace( $element_node->getAttribute('ref') );
+        if ($base_name)
         {
-            # TODO re-load fields from ref type, then push onto fields
+            my ($base_node) = $wsdl_root->findnodes(q|//complexType[@name='| . $base_name . q|']|);
+            unless ($base_node)
+            {
+                # sometimes complex types are defined like: <element name="foo"><complexType>...
+                ($base_node) = $wsdl_root->findnodes(q|//element[@name='| . $base_name . q|']/complexType|);
+            }
+            
+            if ($base_node)
+            {
+                print "Loaded fields from the base type \"$base_name\":\n";
+                my ($base_sequence) = $base_node->findnodes('sequence|all');
+                push(@fields, parse_sequence($base_sequence));
+            }
         }
         else
         {
-            push(@fields, parse_element($element_node));
+            push(@fields, parse_non_complex_element($element_node));
         }
     }
     
     return @fields;
 }
 
-sub parse_element
+sub parse_non_complex_element
 {
     my ($element_node) = @_;
     
@@ -655,7 +669,7 @@ sub create_type_module
 {
     my ($type) = @_;
     
-    my $type_name = $type->{name};
+    my $type_name = $type->{name} || die "cannot find name of type: " . Dumper($type);
     my $fields = $type->{fields};
     
     my $extra_subs = "";
@@ -669,7 +683,7 @@ sub create_type_module
     
     foreach my $field (@$fields)
     {
-        my $field_name = $field->{name};
+        my $field_name = $field->{name} || die "cannot find name of field in type $type_name: " . Dumper($field);
         my $field_type = $field->{type};
         my $min_occurs = $field->{min_occurs};
         my $max_occurs = $field->{max_occurs};
