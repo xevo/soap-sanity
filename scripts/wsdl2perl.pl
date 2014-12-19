@@ -205,7 +205,6 @@ foreach my $type_node (@types_nodes)
         $type_node->appendChild($cloned_schema_node);
     }
     
-    print $SOAP_NS.':schema' . "\n";
     SCHEMA_NODES: foreach my $schema_node ( $type_node->findnodes($SCHEMA_NS.':schema') )
     {
         my $target_namespace = $schema_node->getAttribute('targetNamespace');
