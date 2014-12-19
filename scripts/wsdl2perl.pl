@@ -586,7 +586,7 @@ sub load_xml_as_string
         }
         else
         {
-            die 'Cannot download WSDL: ' . $response->status_line;
+            die "Cannot download $uri - " . $response->status_line;
         }
     }
     elsif (-f $uri)
