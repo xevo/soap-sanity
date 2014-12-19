@@ -592,7 +592,7 @@ sub load_xml_as_string
     elsif (-f $uri)
     {
         local $/ = undef;
-        open FILE, "$uri" or die "Couldn't open WSDL file: $!";
+        open FILE, "$uri" or die "Couldn't open file at $uri - $!";
         binmode FILE;
         $xml_string = <FILE>;
         close FILE;
