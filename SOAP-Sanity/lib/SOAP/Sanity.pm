@@ -23,6 +23,8 @@ detailing exactly how to call each method.
 =head1 RATIONALE
 
 I have always dreaded having to work with SOAP APIs.
+There were times I thought I might drive myself insane
+trying to write perl code that interfaces with them.
 None of the SOAP client modules on CPAN were documented
 very well, and I never could get them to work quite right.
 
