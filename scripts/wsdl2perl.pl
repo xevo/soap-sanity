@@ -191,6 +191,8 @@ foreach my $type_node (@types_nodes)
 {
     print "found types element: " . $type_node->nodeName . "\n";
     
+    # Include is used when the other schema document has the same target namespace as the "main" schema document.
+    # Import is used when the other schema document has a different target namespace.
     my @import_nodes = $type_node->findnodes($SCHEMA_NS.':schema/'.$SCHEMA_NS.':import');
     my @include_nodes = $type_node->findnodes($SCHEMA_NS.':schema/'.$SCHEMA_NS.':include');
     foreach my $import_node ( (@import_nodes, @include_nodes) )
@@ -209,7 +211,7 @@ foreach my $type_node (@types_nodes)
     
     SCHEMA_NODES: foreach my $schema_node ( $type_node->findnodes($SCHEMA_NS.':schema') )
     {
-        my $target_namespace = $schema_node->getAttribute('targetNamespace');
+        my $target_namespace = $schema_node->getAttribute('targetNamespace') || $TARGET_NAMESPACE;
         print "found schema with a target namespace of: $target_namespace\n";
         
         # qualified or unqualified
@@ -277,6 +279,7 @@ foreach my $type_node (@types_nodes)
                 }
                 
                 $SIMPLE_TYPES{$name} = {
+                    target_namespace => $target_namespace,
                     type => $base_type,
                     %enum,
                 };
@@ -288,10 +291,11 @@ foreach my $type_node (@types_nodes)
                 my $fields = parse_complex_type($type_node);
                 
                 $COMPLEX_TYPES{$name} = {
+                    target_namespace => $target_namespace,
                     name => $name,
                     fields => $fields,
                 };
-
+                
                 print Dumper($COMPLEX_TYPES{$name}) . "\n";
             }
         }
