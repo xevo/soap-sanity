@@ -70,32 +70,7 @@ die "the --wsdl uri is required (can be a URL or a file path)" unless $WSDL_URI;
 
 $SAVE_DIR =~ s/\/$//;
 
-my $wsdl_string;
-if ($WSDL_URI =~ /^http/)
-{
-    my $agent = LWP::UserAgent->new( agent => "SOAP::Sanity $SOAP::Sanity::VERSION" );
-    my $response = $agent->get($WSDL_URI);
-    if ($response->is_success)
-    {
-        $wsdl_string = $response->decoded_content;
-    }
-    else
-    {
-        die 'Cannot download WSDL: ' . $response->status_line;
-    }
-}
-elsif (-f $WSDL_URI)
-{
-    local $/ = undef;
-    open FILE, "$WSDL_URI" or die "Couldn't open WSDL file: $!";
-    binmode FILE;
-    $wsdl_string = <FILE>;
-    close FILE;
-}
-else
-{
-    die "cannot load wsdl";
-}
+my $wsdl_string = load_xml_as_string($WSDL_URI);
 
 # my ($soap12_namespace) = $wsdl_string =~ m{xmlns:(\w+)="http://schemas.xmlsoap.org/wsdl/soap12/"};
 # if ($soap12_namespace)
@@ -159,12 +134,6 @@ print "package prefix will be: $PACKAGE_PREFIX\n";
 # remove root attributes...LibXML is finicky
 ###$wsdl_string =~ s{(<\w+) [^>]+}{$1};
 
-my $has_import = $wsdl_dom->findvalue('//'.$SCHEMA_NS.':import/@schemaLocation');
-if ($has_import)
-{
-    die "this script does not work with import elements";
-}
-
 # Services are defined using six major elements:
 # 
 # * types, which provides data type definitions used to describe the messages exchanged.
@@ -220,6 +189,21 @@ die "cannot load types" unless @types_nodes;
 foreach my $type_node (@types_nodes)
 {
     print "found types element: " . $type_node->nodeName . "\n";
+    
+    my @import_nodes = $type_node->findnodes($SCHEMA_NS.':schema/'.$SCHEMA_NS.':import');
+    foreach my $import_node (@import_nodes)
+    {
+        my $schema_uri = $import_node->findvalue('@schemaLocation');
+        print "importing schema from: $schema_uri...\n";
+        
+        my $schema_string = load_xml_as_string($schema_uri);
+        
+        my $dom = XML::LibXML->load_xml(
+            string => (\$schema_string),
+        );
+        my $cloned_schema_node = $dom->documentElement->cloneNode(1); # 1 = deep cloning
+        $type_node->appendChild($cloned_schema_node);
+    }
     
     print $SOAP_NS.':schema' . "\n";
     SCHEMA_NODES: foreach my $schema_node ( $type_node->findnodes($SCHEMA_NS.':schema') )
@@ -582,6 +566,45 @@ close $fh;
 print "\ncreated $service_file_name\n";
 
 print "\nYou can now read the POD in the above client module for documentation on how to call each found method.\n\n";
+
+my $AGENT;
+sub load_xml_as_string
+{
+    my ($uri) = @_;
+    
+    my $xml_string;
+    
+    if ($uri =~ /^http/)
+    {
+        unless ($AGENT)
+        {
+            $AGENT = LWP::UserAgent->new( agent => "SOAP::Sanity $SOAP::Sanity::VERSION", keep_alive => 2 );
+        }
+        my $response = $AGENT->get($uri);
+        if ($response->is_success)
+        {
+            $xml_string = $response->decoded_content;
+        }
+        else
+        {
+            die 'Cannot download WSDL: ' . $response->status_line;
+        }
+    }
+    elsif (-f $uri)
+    {
+        local $/ = undef;
+        open FILE, "$uri" or die "Couldn't open WSDL file: $!";
+        binmode FILE;
+        $xml_string = <FILE>;
+        close FILE;
+    }
+    else
+    {
+        die "cannot load wsdl";
+    }
+    
+    return $xml_string;
+}
 
 sub parse_complex_type
 {
