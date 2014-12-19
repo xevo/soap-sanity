@@ -230,11 +230,18 @@ foreach my $type_node (@types_nodes)
         TYPE_NODES: foreach my $type_node ( $schema_node->childNodes )
         {
             my $node_name = remove_namespace( $type_node->nodeName );
+            
+            unless ( $node_name =~ /element|complexType|simpleType/ )
+            {
+                next TYPE_NODES;
+            }
+            
             my $name = $type_node->getAttribute('name');
             my $type = remove_namespace( $type_node->getAttribute('type') );
             
-            unless ($name)
+            unless ( $name )
             {
+                warn "name not found for $node_name node";
                 next TYPE_NODES;
             }
             
@@ -553,7 +560,7 @@ foreach my $method_name ( sort keys %METHODS )
         my $response_class = $PACKAGE_PREFIX . '::' . $output;
         
         $service .= $TAB . 'my $message = ' . $request_class . '->new(%args);' . "\n";
-        $service .= $TAB . 'my $response_node = $self->_make_document_request($message);' . "\n";
+        $service .= $TAB . 'my $response_node = $self->_make_document_request($message, \'' . $soap_action . '\');' . "\n";
         $service .= $TAB . 'my $response_object = ' . $response_class . '->new();' . "\n";
         $service .= $TAB . '$response_object->_unserialize($response_node->findnodes("Body/' . $output . '"));' . "\n";
         $service .= $TAB . 'return $response_object;' . "\n";

@@ -14,7 +14,7 @@ has parser => ( is => 'ro', default => sub { XML::LibXML->new } );
 
 sub _make_document_request
 {
-    my ($self, $request) = @_;
+    my ($self, $request, $soap_action) = @_;
     
     # The element name is "Envelope".
     # The element MUST be present in a SOAP message
@@ -58,9 +58,11 @@ sub _make_document_request
     
     my $request_xml = $dom->toString(1);
     
-    my $response = $self->agent->post($self->service_uri, SOAPAction => 'http://ws.cdyne.com/WeatherWS/GetCityForecastByZIP', Content => $request_xml);
+    my %headers;
+    $headers{'Content-Type'} = 'text/xml; charset=utf-8';
+    $headers{'SOAPAction'} = $soap_action if $soap_action;
     
-    return $self->_post($request_xml);
+    return $self->_post($request_xml, \%headers);
 }
 
 #
@@ -131,10 +133,10 @@ sub _make_rpc_request
 
 sub _post
 {
-    my ($self, $request_xml) = @_;
+    my ($self, $request_xml, $headers) = @_;
     
     print "POST: " . $self->service_uri . "\n$request_xml\n\n";
-    my $response = $self->agent->post($self->service_uri, Content => $request_xml);
+    my $response = $self->agent->post($self->service_uri, %$headers, Content => $request_xml);
     
     my $response_content = $response->decoded_content;
     print "RESPONSE: $response_content\n\n";
