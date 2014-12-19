@@ -10,7 +10,8 @@ wsdl2perl.pl
 
 Start by running this script, passing it the location of the WSDL:
 
-    wsdl2perl.pl --wsdl http://example.com/soap/wsdl
+    $ cd scripts
+    $ perl wsdl2perl.pl --wsdl http://example.com/path/to/wsdl
 
 The objects will be generated into a directory called lib,
 inside of your current working directory.
@@ -96,19 +97,19 @@ else
     die "cannot load wsdl";
 }
 
-my ($soap12_namespace) = $wsdl_string =~ m{xmlns:(\w+)="http://schemas.xmlsoap.org/wsdl/soap12/"};
-if ($soap12_namespace)
-{
-    warn "this script currently only works with SOAP 1.1...stomping all soap12 elements";
-    $wsdl_string =~ s{$soap12_namespace:}{${soap12_namespace}_}gms;
-}
+# my ($soap12_namespace) = $wsdl_string =~ m{xmlns:(\w+)="http://schemas.xmlsoap.org/wsdl/soap12/"};
+# if ($soap12_namespace)
+# {
+#     warn "this script currently only works with SOAP 1.1...stomping all soap12 elements";
+#     $wsdl_string =~ s{$soap12_namespace:}{${soap12_namespace}_}gms;
+# }
 
 # remove namespaces to make parsing easier
 # also, this will work with broken wsld files that do not declare namespaces correctly
 # yea, this is a hack...
-$wsdl_string =~ s{<definitions[^>]+>}{<definitions>}xms;
-$wsdl_string =~ s{( < (?:\s*/\s*)? ) \w+\: ([\w\-]+)}{$1$2}xg;
-$wsdl_string =~ s{ \s \w+: ([\w\-]+=")  }{ $1}xg;
+###$wsdl_string =~ s{<definitions[^>]+>}{<definitions>}xms;
+###$wsdl_string =~ s{( < (?:\s*/\s*)? ) \w+\: ([\w\-]+)}{$1$2}xg;
+###$wsdl_string =~ s{ \s \w+: ([\w\-]+=")  }{ $1}xg;
 
 my $wsdl_dom = XML::LibXML->load_xml(
     string => (\$wsdl_string),
@@ -116,23 +117,49 @@ my $wsdl_dom = XML::LibXML->load_xml(
 my $wsdl_root = $wsdl_dom->documentElement;
 #print $wsdl_root->toString(1) . "\n";
 
+my $SCHEMA_NS;
+my $SOAP_NS;
+my $WSDL_NS;
+my $TARGET_NAMESPACE;
+foreach my $attr ( $wsdl_root->attributes )
+{
+    my $name = remove_namespace( $attr->nodeName );
+    my $value = $attr->value;
+    if ( $value =~ m{^http://www.w3.org/2001/XMLSchema/?$}i )
+    {
+        $SCHEMA_NS = $name;
+    }
+    elsif ( $value =~ m{^http://schemas.xmlsoap.org/wsdl/soap/?$}i )
+    {
+        $SOAP_NS = $name;
+    }
+    elsif ( $value =~ m{^http://schemas.xmlsoap.org/wsdl/?$}i )
+    {
+        $WSDL_NS = $name;
+    }
+    elsif ( $name eq 'targetNamespace' )
+    {
+        $TARGET_NAMESPACE = $value;
+    }
+}
+die "cannot find soap namespace in WSDL root node" unless $SOAP_NS;
+die "cannot find wsdl namespace in WSDL root node" unless $WSDL_NS;
+die "cannot find target namespace in WSDL root node" unless $TARGET_NAMESPACE;
+
 unless ($PACKAGE_PREFIX)
 {
-    my $name = $wsdl_root->findvalue('//service/@name');
-    die "$wsdl_string\n\ncannot find the service name in the WSDL, you must pass --package_prefix for this service" unless $name;
+    my $xpath = '//'.$WSDL_NS.':service/@name';
+    my $name = $wsdl_root->findvalue($xpath);
+    die "$wsdl_string\n\ncannot find the service name in the WSDL, you must pass --package_prefix for this service - $xpath" unless $name;
     $PACKAGE_PREFIX = 'SOAP::Sanity::' . $name;
 }
 $PACKAGE_PREFIX =~ s/::$//;
 print "package prefix will be: $PACKAGE_PREFIX\n";
 
-# TODO attach the namespace to the types since there could be multiple schemas
-my $TARGET_NAMESPACE = $wsdl_root->findvalue('//schema/@targetNamespace');
-die "cannot find target namespace in WSDL root node" unless $TARGET_NAMESPACE;
-
 # remove root attributes...LibXML is finicky
-$wsdl_string =~ s{(<\w+) [^>]+}{$1};
+###$wsdl_string =~ s{(<\w+) [^>]+}{$1};
 
-my $has_import = $wsdl_dom->findvalue('//import/@schemaLocation');
+my $has_import = $wsdl_dom->findvalue('//'.$SCHEMA_NS.':import/@schemaLocation');
 if ($has_import)
 {
     die "this script does not work with import elements";
@@ -150,7 +177,7 @@ if ($has_import)
 #
 # Load service so we know where to POST to
 #
-my $service_uri = $wsdl_root->findvalue('service/port/address/@location');
+my $service_uri = $wsdl_root->findvalue($WSDL_NS.':service/'.$WSDL_NS.':port/'.$SOAP_NS.':address/@location');
 die "cannot determine service uri" unless $service_uri;
 print "service is at: $service_uri\n";
 
@@ -162,13 +189,13 @@ my %METHODS;
 #
 # Load messages
 #
-foreach my $message_node ( $wsdl_root->findnodes('//message') )
+foreach my $message_node ( $wsdl_root->findnodes('//'.$WSDL_NS.':message') )
 {
     my $message_name = remove_namespace( $message_node->findvalue('@name') );
     die "missing name in message node: $message_node" unless $message_name;
     
     my @parts;
-    foreach my $part ( $message_node->findnodes('part') )
+    foreach my $part ( $message_node->findnodes($WSDL_NS.':part') )
     {
         my $part_name = remove_namespace( $part->findvalue('@name') );
         my $element = remove_namespace( $part->findvalue('@element') );
@@ -183,24 +210,26 @@ foreach my $message_node ( $wsdl_root->findnodes('//message') )
     
     $MESSAGES{$message_name} = \@parts;
 }
+die "no messages found" unless %MESSAGES;
 
 #
 # Load types...the complex ones will become objects
 #
-my @types_nodes = $wsdl_root->findnodes('types');
+my @types_nodes = $wsdl_root->findnodes($WSDL_NS.':types');
 die "cannot load types" unless @types_nodes;
 foreach my $type_node (@types_nodes)
 {
-    print "found types element\n";
+    print "found types element: " . $type_node->nodeName . "\n";
     
-    SCHEMA_NODES: foreach my $schema_node ( $type_node->findnodes('schema') )
+    print $SOAP_NS.':schema' . "\n";
+    SCHEMA_NODES: foreach my $schema_node ( $type_node->findnodes($SCHEMA_NS.':schema') )
     {
         my $target_namespace = $schema_node->getAttribute('targetNamespace');
         print "found schema with a target namespace of: $target_namespace\n";
         
-        TYPE_NODES: foreach my $type_node ( $schema_node->findnodes('./*') )
+        TYPE_NODES: foreach my $type_node ( $schema_node->childNodes )
         {
-            my $node_name = $type_node->nodeName;
+            my $node_name = remove_namespace( $type_node->nodeName );
             my $name = $type_node->getAttribute('name');
             my $type = remove_namespace( $type_node->getAttribute('type') );
             
@@ -212,7 +241,7 @@ foreach my $type_node (@types_nodes)
             if ($node_name eq 'element')
             {
                 # sometimes a ComplexType will be within an element node
-                my ($deeper_type_node) = $type_node->findnodes('complexType');
+                my ($deeper_type_node) = $type_node->findnodes($SCHEMA_NS.':complexType');
                 
                 if ($deeper_type_node)
                 {
@@ -224,7 +253,7 @@ foreach my $type_node (@types_nodes)
                 }
             }
             
-            my $sequence_type = remove_namespace( $type_node->findvalue('sequence/element/@type') );
+            my $sequence_type = remove_namespace( $type_node->findvalue($SCHEMA_NS.':sequence/'.$SCHEMA_NS.':element/@type') );
             if (( $sequence_type ) && ( $sequence_type eq $name ))
             {
                 # this is just an element redefining this type...skip it
@@ -237,11 +266,11 @@ foreach my $type_node (@types_nodes)
                 
                 warn "found simpleType: $name";
                 
-                my $base_type = remove_namespace( $type_node->findvalue('restriction/@base') );
+                my $base_type = remove_namespace( $type_node->findvalue($SCHEMA_NS.':restriction/@base') );
                 $base_type = $type unless ($base_type);
                 
                 my %enum;
-                my @enum_nodes = $type_node->findnodes('restriction/enumeration');
+                my @enum_nodes = $type_node->findnodes($SOAP_NS.':restriction/'.$SCHEMA_NS.':enumeration');
                 if (@enum_nodes)
                 {
                     my @enum;
@@ -277,23 +306,25 @@ foreach my $type_node (@types_nodes)
 #
 # Load ports (operations)
 #
-foreach my $port_type_node ( $wsdl_root->findnodes('portType') )
+foreach my $port_type_node ( $wsdl_root->findnodes($WSDL_NS.':portType') )
 {
     my $name = $port_type_node->getAttribute('name');
+    
+    my $binding = $wsdl_root->findvalue('//'.$WSDL_NS.':binding/'.$SOAP_NS.':binding/@style');
     
     print "\n";
     print "**********************************************************************\n";
     print "PARSING PORT: $name\n";
     print "**********************************************************************\n";
     
-    foreach my $operation_node ( $port_type_node->findnodes('operation') )
+    foreach my $operation_node ( $port_type_node->findnodes($WSDL_NS.':operation') )
     {
         my $name = $operation_node->getAttribute('name');
-        my $input_message_name = remove_namespace( $operation_node->findvalue('input/@message') );
-        my $output_message_name = remove_namespace( $operation_node->findvalue('output/@message') );
-        my $documentation = $operation_node->findvalue('documentation');
-        my $soap_action = $wsdl_root->findvalue('//binding/operation[@name=\'' . $name . '\']/operation/@soapAction');
-        my $binding = $wsdl_root->findvalue('//binding/operation[@name=\'' . $name . '\']/operation/@style');
+        my $input_message_name = remove_namespace( $operation_node->findvalue($WSDL_NS.':input/@message') );
+        my $output_message_name = remove_namespace( $operation_node->findvalue($WSDL_NS.':output/@message') );
+        my $documentation = $operation_node->findvalue($WSDL_NS.':documentation');
+        my $soap_action = $wsdl_root->findvalue('//'.$WSDL_NS.':binding/'.$WSDL_NS.':operation[@name=\'' . $name . '\']/'.$SOAP_NS.':operation/@soapAction');
+        my $binding = $wsdl_root->findvalue('//'.$WSDL_NS.':binding/'.$WSDL_NS.':operation[@name=\'' . $name . '\']/'.$SOAP_NS.':operation/@style') || $binding;
         
         die "no binding found for method: $name" unless $binding;
         
@@ -306,6 +337,7 @@ foreach my $port_type_node ( $wsdl_root->findnodes('portType') )
             output_parts => $MESSAGES{$output_message_name},
             documentation => $documentation,
             binding => $binding,
+            # TODO this should become a SOAPAction header in the request
             soap_action => $soap_action,
         };
     }
@@ -334,7 +366,7 @@ print "created $save_path/SOAPSanityObjects.pm\n";
 
 print "\n";
 print "**********************************************************************\n";
-print "CREATING SERVICE\n";
+print "CREATING CLIENT\n";
 print "**********************************************************************\n";
 my $service_module_name = $PACKAGE_PREFIX . 'Client';
 my $service = "package $service_module_name;\n";
@@ -354,11 +386,11 @@ $service .= "\n=head1 SYNOPSIS\n\n";
 $service .= "  use $service_module_name;\n";
 $service .= "  my \$service = $service_module_name->new();\n";
 
-my $service_documentation = $wsdl_root->findvalue('//service/documentation');
+my $service_documentation = $wsdl_root->findvalue('//'.$WSDL_NS.':service/'.$WSDL_NS.':documentation');
 # add the service docs from the WSDL, if provided
 if ($service_documentation)
 {
-    $service_documentation =~ s{^\s*}{}gm;
+    #$service_documentation =~ s{^\s*}{}gm;
     
     $service .= "\n=head1 SERVICE DOCUMENTATION\n\n";
     $service .= "$service_documentation\n";
@@ -367,6 +399,8 @@ if ($service_documentation)
 $service .= "\n=head1 METHODS\n";
 foreach my $method_name ( sort keys %METHODS )
 {
+    print "adding method: $method_name\n";
+    
     my $method = $METHODS{$method_name};
     my $input = $method->{input_message_name};
     my $output = $method->{output_message_name};
@@ -379,7 +413,7 @@ foreach my $method_name ( sort keys %METHODS )
     # add the method docs from the WSDL, if provided
     if ($documentation)
     {
-        $documentation =~ s{^\s*}{}gm;
+        #$documentation =~ s{^\s*}{}gm;
         
         $service .= "$documentation\n\n";
     }
@@ -398,12 +432,13 @@ foreach my $method_name ( sort keys %METHODS )
         # simple type?
         else
         {
-            $service .= "$part_name: $part_type   -WAT\n\n";
+            $service .= "$part_name: $part_type\n\n";
         }
     }
     
     my $part_order = "";
     
+    # TODO actually the response is one object deep...for simplicity, the root object is not returned (for document binding)
     $service .= $TAB . '# returns a ' . $PACKAGE_PREFIX . '::' . $output . ' object' . "\n";
     $service .= $TAB . 'my $' . $output . ' = $service->' . $method_name . '(' . "\n";
     
@@ -513,8 +548,15 @@ foreach my $method_name ( sort keys %METHODS )
         my $type = $COMPLEX_TYPES{$part_type};
         my $type_name = $type->{name};
         
-        $service .= $TAB . 'my $message = ' . ${PACKAGE_PREFIX} . '::' . $type_name . '->new(%args);' . "\n";
-        $service .= $TAB . 'return $self->_make_document_request($message);' . "\n";
+        my $request_class = $PACKAGE_PREFIX . '::' . ($type->{name} || $method_name);
+        
+        my $response_class = $PACKAGE_PREFIX . '::' . $output;
+        
+        $service .= $TAB . 'my $message = ' . $request_class . '->new(%args);' . "\n";
+        $service .= $TAB . 'my $response_node = $self->_make_document_request($message);' . "\n";
+        $service .= $TAB . 'my $response_object = ' . $response_class . '->new();' . "\n";
+        $service .= $TAB . '$response_object->_unserialize($response_node->findnodes("Body/' . $output . '"));' . "\n";
+        $service .= $TAB . 'return $response_object;' . "\n";
     }
     else
     {
@@ -530,7 +572,9 @@ my $service_file_name = $save_path . 'Client.pm';
 open(my $fh, ">", "$service_file_name") or die "cannot create $service_file_name: $!";
 print $fh $service;
 close $fh;
-print "created $service_file_name\n";
+print "\ncreated $service_file_name\n";
+
+print "\nYou can now read the POD in the above client module for documentation on how to call each found method.\n\n";
 
 sub parse_complex_type
 {
@@ -538,7 +582,7 @@ sub parse_complex_type
     
     my @fields;
     
-    my $node_name = $type_node->nodeName;
+    my $node_name = remove_namespace( $type_node->nodeName );
     my $name = remove_namespace( $type_node->getAttribute('name') ) || "";
     my $type = remove_namespace( $type_node->getAttribute('type') ) || "";
     
@@ -549,13 +593,13 @@ sub parse_complex_type
     
     if ($type)
     {
-        push(@fields, parse_element($type_node));
+        push(@fields, parse_non_complex_element($type_node));
     }
     else
     {
-        foreach my $node ( $type_node->findnodes('./*') )
+        foreach my $node ( $type_node->childNodes )
         {
-            my $node_name = $node->nodeName;
+            my $node_name = remove_namespace( $node->nodeName );
             print "Parsing node: $node_name\n";
 
             if ( $node_name eq 'sequence' || $node_name eq 'all' )
@@ -564,17 +608,23 @@ sub parse_complex_type
             }
             elsif ( $node_name eq 'complexContent' )
             {
-                foreach my $extension_node ( $node->findnodes('extension') )
+                foreach my $extension_node ( $node->findnodes($SCHEMA_NS.':extension') )
                 {
                     my $base_name = remove_namespace( $extension_node->findvalue('@base') );
                     
                     if ($base_name)
                     {
-                        my ($base_node) = $wsdl_root->findnodes(q|//complexType[@name='| . $base_name . q|']|);
+                        my ($base_node) = $wsdl_root->findnodes('//'.$SCHEMA_NS.':complexType[@name=\'' . $base_name . '\']');
                         if ($base_node)
                         {
                             print "Loaded fields from the base type \"$base_name\":\n";
-                            my ($base_sequence) = $base_node->findnodes('sequence|all');
+                            
+                            # all - Specifies that the child elements can appear in any order. Each child element can occur 0 or 1 time
+                            # sequence - Specifies that the child elements must appear in a sequence. Each child element can occur from 0 to any number of times
+                            # For this parser's sake, it will treat them the same and always keep them in order.
+                            
+                            # TODO "choice" could be a parent
+                            my ($base_sequence) = $base_node->findnodes("$SCHEMA_NS:sequence|$SCHEMA_NS:all");
                             push(@fields, parse_sequence($base_sequence));
                         }
                         else
@@ -583,7 +633,9 @@ sub parse_complex_type
                         }
                         
                         print "Extending \"$base_name\" type with these fields:\n";
-                        my ($additional_sequence) = $extension_node->findnodes('sequence|all');
+                        
+                        # TODO "choice" could be a parent
+                        my ($additional_sequence) = $extension_node->findnodes("$SCHEMA_NS:sequence|$SCHEMA_NS:all");
                         push(@fields, parse_sequence($additional_sequence));
                     }
                 }
@@ -606,20 +658,51 @@ sub parse_sequence
     
     my @fields;
     
-    foreach my $element_node ( $sequence_node->findnodes('element') )
+    foreach my $element_node ( $sequence_node->findnodes("$SCHEMA_NS:element") )
     {
-        push(@fields, parse_element($element_node));
+        # check to see if this references another element
+        # (think of a ref element as a perl parent, or base, class)
+        my $base_name = remove_namespace( $element_node->getAttribute('ref') );
+        if ($base_name)
+        {
+            my ($base_node) = $wsdl_root->findnodes('//'.$SCHEMA_NS.':complexType[@name=\'' . $base_name . '\']');
+            unless ($base_node)
+            {
+                # sometimes complex types are defined like: <element name="foo"><complexType>...
+                ($base_node) = $wsdl_root->findnodes('//'.$SCHEMA_NS.':element[@name=\'' . $base_name . '\']/complexType');
+            }
+            unless ($base_node)
+            {
+                # groups are defined like: <group name="foo"><sequence>...
+                ($base_node) = $wsdl_root->findnodes('//'.$SCHEMA_NS.':group[@name=\'' . $base_name . '\']');
+            }
+            
+            if ($base_node)
+            {
+                print "Loaded fields from the base type \"$base_name\":\n";
+                # all - Specifies that the child elements can appear in any order. Each child element can occur 0 or 1 time
+                # sequence - Specifies that the child elements must appear in a sequence. Each child element can occur from 0 to any number of times
+                # For this parser's sake, it will treat them the same and always keep them in order.
+                
+                # TODO "choice" could be a parent
+                my ($base_sequence) = $base_node->findnodes("$SCHEMA_NS:sequence|$SCHEMA_NS:all");
+                push(@fields, parse_sequence($base_sequence));
+            }
+        }
+        else
+        {
+            push(@fields, parse_non_complex_element($element_node));
+        }
     }
     
     return @fields;
 }
 
-sub parse_element
+sub parse_non_complex_element
 {
     my ($element_node) = @_;
     
     my $field = {};
-
     $field->{name} = $element_node->getAttribute('name');
     $field->{type} = remove_namespace( $element_node->getAttribute('type') );
     $field->{min_occurs} = $element_node->getAttribute('minOccurs') || 1;
@@ -637,7 +720,7 @@ sub create_type_module
 {
     my ($type) = @_;
     
-    my $type_name = $type->{name};
+    my $type_name = $type->{name} || die "cannot find name of type: " . Dumper($type);
     my $fields = $type->{fields};
     
     my $extra_subs = "";
@@ -651,7 +734,7 @@ sub create_type_module
     
     foreach my $field (@$fields)
     {
-        my $field_name = $field->{name};
+        my $field_name = $field->{name} || die "cannot find name of field in type $type_name: " . Dumper($field);
         my $field_type = $field->{type};
         my $min_occurs = $field->{min_occurs};
         my $max_occurs = $field->{max_occurs};
@@ -700,6 +783,58 @@ sub create_type_module
     }
     $module .= "\n";
     $module .= $TAB . 'return $type_node;' . "\n";
+    $module .= "}\n";
+    
+    $module .= "\nsub _unserialize\n";
+    $module .= "{\n";
+    $module .= $TAB . 'my ($self, $node) = @_;' . "\n\n";
+    $module .= $TAB . 'return unless $node;' . "\n\n";
+    foreach my $field (@$fields)
+    {
+        my $field_name = $field->{name}; # the accessor name
+        my $field_type = $field->{type}; # will be the object class if this is a complex type
+        my $min_occurs = $field->{min_occurs};
+        my $max_occurs = $field->{max_occurs};
+        my $nillable = $field->{nillable};
+        my $is_array = ( ( $max_occurs > 1 ) || ( $max_occurs eq 'unbounded' ) ) ? 1 : 0;
+        
+        if ( $COMPLEX_TYPES{$field_type} )
+        {
+            if ($is_array)
+            {
+                $module .= $TAB . 'foreach my $node2 ( $node->findnodes("' . $field_name . '") )'. "\n";
+                $module .= $TAB . '{' . "\n";
+                $module .= "$TAB$TAB" . 'my $' . $field_name . ' = ' . "$PACKAGE_PREFIX::$field_type" . '->new();' . "\n";
+                $module .= "$TAB$TAB" . '$' . $field_name . '->_unserialize($node2);'. "\n";
+                $module .= "$TAB$TAB" . '$self->add_' . $field_name . '($' . $field_name . ');' . "\n";
+                $module .= $TAB . '}' . "\n";
+            }
+            else
+            {
+                $module .= "\n";
+                $module .= $TAB . 'my $' . $field_name . ' = ' . "$PACKAGE_PREFIX::$field_type" . '->new();' . "\n";
+                $module .= $TAB . '$' . $field_name . '->_unserialize( $node->findnodes("' . $field_name . '") );'. "\n";
+                $module .= $TAB . '$self->' . $field_name . '($' . $field_name . ');' . "\n";
+                $module .= "\n";
+            }
+        }
+        else
+        {
+            if ($is_array)
+            {
+                $module .= $TAB . 'foreach my $node2 ( $node->findnodes("' . $field_name . '") )'. "\n";
+                $module .= $TAB . '{' . "\n";
+                $module .= "$TAB$TAB" . '$self->add_' . $field_name . '($node2->textContent);' . "\n";
+                $module .= $TAB . '}' . "\n";
+            }
+            else
+            {
+                $module .= $TAB . '$self->' . $field_name . '( $node->findvalue("' . $field_name . '") );' . "\n";
+            }
+        }
+    }
+    $module .= "\n";
+    $module .= $TAB . 'return;' . "\n";
     $module .= "}\n";
     
     $module .= "\n1;\n";
