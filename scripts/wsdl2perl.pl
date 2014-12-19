@@ -100,15 +100,15 @@ foreach my $attr ( $wsdl_root->attributes )
 {
     my $name = remove_namespace( $attr->nodeName );
     my $value = $attr->value;
-    if ( $value =~ m{^http://www.w3.org/2001/XMLSchema/?$}i )
+    if ( $value =~ m{^https?://www.w3.org/2001/XMLSchema/?$}i )
     {
         $SCHEMA_NS = $name;
     }
-    elsif ( $value =~ m{^http://schemas.xmlsoap.org/wsdl/soap/?$}i )
+    elsif ( $value =~ m{^https?://schemas.xmlsoap.org/wsdl/soap/?$}i )
     {
         $SOAP_NS = $name;
     }
-    elsif ( $value =~ m{^http://schemas.xmlsoap.org/wsdl/?$}i )
+    elsif ( $value =~ m{^https?://schemas.xmlsoap.org/wsdl/?$}i )
     {
         $WSDL_NS = $name;
     }
@@ -117,6 +117,7 @@ foreach my $attr ( $wsdl_root->attributes )
         $TARGET_NAMESPACE = $value;
     }
 }
+die "cannot find schema namespace in WSDL root node" unless $SCHEMA_NS;
 die "cannot find soap namespace in WSDL root node" unless $SOAP_NS;
 die "cannot find wsdl namespace in WSDL root node" unless $WSDL_NS;
 die "cannot find target namespace in WSDL root node" unless $TARGET_NAMESPACE;
@@ -191,7 +192,8 @@ foreach my $type_node (@types_nodes)
     print "found types element: " . $type_node->nodeName . "\n";
     
     my @import_nodes = $type_node->findnodes($SCHEMA_NS.':schema/'.$SCHEMA_NS.':import');
-    foreach my $import_node (@import_nodes)
+    my @include_nodes = $type_node->findnodes($SCHEMA_NS.':schema/'.$SCHEMA_NS.':include');
+    foreach my $import_node ( (@import_nodes, @include_nodes) )
     {
         my $schema_uri = $import_node->findvalue('@schemaLocation');
         print "importing schema from: $schema_uri...\n";
@@ -209,6 +211,9 @@ foreach my $type_node (@types_nodes)
     {
         my $target_namespace = $schema_node->getAttribute('targetNamespace');
         print "found schema with a target namespace of: $target_namespace\n";
+        
+        # qualified or unqualified
+        my $element_form_default = $schema_node->getAttribute('elementFormDefault');
         
         TYPE_NODES: foreach my $type_node ( $schema_node->childNodes )
         {
