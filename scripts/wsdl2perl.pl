@@ -52,6 +52,8 @@ use File::Path qw(make_path);
 use LWP::UserAgent;
 use XML::LibXML;
 use Data::Dumper;
+use Carp;
+use Scalar::Util qw(blessed);
 
 use SOAP::Sanity;
 
@@ -92,14 +94,19 @@ my $wsdl_dom = XML::LibXML->load_xml(
 my $wsdl_root = $wsdl_dom->documentElement;
 #print $wsdl_root->toString(1) . "\n";
 
+my $SCHEMA_NODE;
 my $SCHEMA_NS;
 my $SOAP_NS;
 my $WSDL_NS;
 my $TARGET_NAMESPACE;
+print "processing root attributes:\n";
 foreach my $attr ( $wsdl_root->attributes )
 {
     my $name = remove_namespace( $attr->nodeName );
     my $value = $attr->value;
+    
+    print "\t" . $name . " = $value\n";
+    
     if ( $value =~ m{^https?://www.w3.org/2001/XMLSchema/?$}i )
     {
         $SCHEMA_NS = $name;
@@ -117,7 +124,7 @@ foreach my $attr ( $wsdl_root->attributes )
         $TARGET_NAMESPACE = $value;
     }
 }
-die "cannot find schema namespace in WSDL root node" unless $SCHEMA_NS;
+warn "cannot find schema namespace in WSDL root node (it's probably defined on the schema element(s)" unless $SCHEMA_NS;
 die "cannot find soap namespace in WSDL root node" unless $SOAP_NS;
 die "cannot find wsdl namespace in WSDL root node" unless $WSDL_NS;
 die "cannot find target namespace in WSDL root node" unless $TARGET_NAMESPACE;
@@ -191,28 +198,41 @@ foreach my $type_node (@types_nodes)
 {
     print "found types element: " . $type_node->nodeName . "\n";
     
-    # Include is used when the other schema document has the same target namespace as the "main" schema document.
-    # Import is used when the other schema document has a different target namespace.
-    my @import_nodes = $type_node->findnodes($SCHEMA_NS.':schema/'.$SCHEMA_NS.':import');
-    my @include_nodes = $type_node->findnodes($SCHEMA_NS.':schema/'.$SCHEMA_NS.':include');
-    foreach my $import_node ( (@import_nodes, @include_nodes) )
+    foreach my $schema_node ( $type_node->childNodes )
     {
-        my $schema_uri = $import_node->findvalue('@schemaLocation');
-        print "importing schema from: $schema_uri...\n";
+        my ($node_name, $node_namespace) = remove_namespace( $schema_node->nodeName );
+        next unless $node_name eq 'schema';
         
-        my $schema_string = load_xml_as_string($schema_uri);
+        die "cannot determine schema namespace" unless $node_namespace;
         
-        my $dom = XML::LibXML->load_xml(
-            string => (\$schema_string),
-        );
-        my $cloned_schema_node = $dom->documentElement->cloneNode(1); # 1 = deep cloning
-        $type_node->appendChild($cloned_schema_node);
-    }
-    
-    SCHEMA_NODES: foreach my $schema_node ( $type_node->findnodes($SCHEMA_NS.':schema') )
-    {
-        my $target_namespace = $schema_node->getAttribute('targetNamespace') || $TARGET_NAMESPACE;
-        print "found schema with a target namespace of: $target_namespace\n";
+        $SCHEMA_NODE = $schema_node;
+        $SCHEMA_NS = $node_namespace;
+        
+        print "schema namespace: $SCHEMA_NS\n";
+        
+        foreach my $node ( $schema_node->childNodes )
+        {
+            my $node_name = remove_namespace( $node->nodeName );
+            
+            # Include is used when the other schema document has the same target namespace as the "main" schema document.
+            # Import is used when the other schema document has a different target namespace.
+            if (( $node_name eq 'import' ) || ( $node_name eq 'include' ))
+            {
+                my $schema_uri = $node->findvalue('@schemaLocation');
+                if ($schema_uri)
+                {
+                    print "importing schema from: $schema_uri...\n";
+
+                    my $schema_string = load_xml_as_string($schema_uri);
+
+                    my $dom = XML::LibXML->load_xml(
+                        string => (\$schema_string),
+                    );
+                    my $cloned_schema_node = $dom->documentElement->cloneNode(1); # 1 = deep cloning
+                    $type_node->appendChild($cloned_schema_node);
+                }
+            }
+        }
         
         # qualified or unqualified
         my $element_form_default = $schema_node->getAttribute('elementFormDefault');
@@ -223,11 +243,18 @@ foreach my $type_node (@types_nodes)
             
             unless ( $node_name =~ /element|complexType|simpleType/ )
             {
+                print "skipping $node_name element\n";
                 next TYPE_NODES;
             }
             
             my $name = $type_node->getAttribute('name');
-            my $type = remove_namespace( $type_node->getAttribute('type') );
+            my ($type, $type_prefix) = remove_namespace( $type_node->getAttribute('type') );
+            
+            my ($target_namespace) = _attribute_reverse_search($type_node, 'targetNamespace');
+            warn "cannot find attribute - targetNamespace" unless $target_namespace;
+            
+            #my ($type_namespace) = _attribute_reverse_search($type_node, 'xmlns:' . $type_prefix);
+            #warn "cannot find attribute - xmlns:$type_prefix" unless $type_namespace;
             
             unless ( $name )
             {
@@ -279,6 +306,8 @@ foreach my $type_node (@types_nodes)
                 }
                 
                 $SIMPLE_TYPES{$name} = {
+                    namespace_prefix => $type_prefix,
+                    #type_namespace => $type_namespace,
                     target_namespace => $target_namespace,
                     type => $base_type,
                     %enum,
@@ -291,14 +320,39 @@ foreach my $type_node (@types_nodes)
                 my $fields = parse_complex_type($type_node);
                 
                 $COMPLEX_TYPES{$name} = {
+                    namespace_prefix => $type_prefix,
+                    #type_namespace => $type_namespace,
                     target_namespace => $target_namespace,
                     name => $name,
                     fields => $fields,
                 };
                 
+                print "found complex type:\n";
                 print Dumper($COMPLEX_TYPES{$name}) . "\n";
             }
         }
+    }
+}
+
+sub _attribute_reverse_search
+{
+    my ($element, $name) = @_;
+    
+    croak "first arg must be an XML::LibXML::Element" unless blessed($element) && $element->isa('XML::LibXML::Element');
+    croak "second arg must be an element name" unless $name && !ref($name);
+    
+    my $value = $element->getAttribute($name);
+    return ($value, $element) if $value;
+    
+    my $parent_element = $element->parentNode;
+    
+    if ( blessed($parent_element) && $parent_element->isa('XML::LibXML::Element') )
+    {
+        return _attribute_reverse_search($parent_element, $name) if $parent_element;
+    }
+    else
+    {
+        return undef;
     }
 }
 
@@ -580,6 +634,8 @@ sub load_xml_as_string
 {
     my ($uri) = @_;
     
+    croak "blank uri" unless $uri;
+    
     my $xml_string;
     
     if ($uri =~ /^http/)
@@ -608,7 +664,7 @@ sub load_xml_as_string
     }
     else
     {
-        die "cannot load wsdl";
+        croak "cannot load wsdl at $uri";
     }
     
     return $xml_string;
@@ -646,13 +702,17 @@ sub parse_complex_type
             }
             elsif ( $node_name eq 'complexContent' )
             {
+                print "looking for extensions...\n";
                 foreach my $extension_node ( $node->findnodes($SCHEMA_NS.':extension') )
                 {
                     my $base_name = remove_namespace( $extension_node->findvalue('@base') );
-                    
                     if ($base_name)
                     {
-                        my ($base_node) = $wsdl_root->findnodes('//'.$SCHEMA_NS.':complexType[@name=\'' . $base_name . '\']');
+                        print "found extension base: $base_name\n";
+                        print 'looking for base complexType with xpath: ' . '//'.$SCHEMA_NS.':complexType[@name=\'' . $base_name . '\']' . "\n";
+                        
+                        # TODO what if the base node is in a different <schema>?
+                        my ($base_node) = $SCHEMA_NODE->findnodes('//'.$SCHEMA_NS.':complexType[@name=\'' . $base_name . '\']');
                         if ($base_node)
                         {
                             print "Loaded fields from the base type \"$base_name\":\n";
@@ -703,16 +763,16 @@ sub parse_sequence
         my $base_name = remove_namespace( $element_node->getAttribute('ref') );
         if ($base_name)
         {
-            my ($base_node) = $wsdl_root->findnodes('//'.$SCHEMA_NS.':complexType[@name=\'' . $base_name . '\']');
+            my ($base_node) = $SCHEMA_NODE->findnodes('//'.$SCHEMA_NS.':complexType[@name=\'' . $base_name . '\']');
             unless ($base_node)
             {
                 # sometimes complex types are defined like: <element name="foo"><complexType>...
-                ($base_node) = $wsdl_root->findnodes('//'.$SCHEMA_NS.':element[@name=\'' . $base_name . '\']/complexType');
+                ($base_node) = $SCHEMA_NODE->findnodes('//'.$SCHEMA_NS.':element[@name=\'' . $base_name . '\']/complexType');
             }
             unless ($base_node)
             {
                 # groups are defined like: <group name="foo"><sequence>...
-                ($base_node) = $wsdl_root->findnodes('//'.$SCHEMA_NS.':group[@name=\'' . $base_name . '\']');
+                ($base_node) = $SCHEMA_NODE->findnodes('//'.$SCHEMA_NS.':group[@name=\'' . $base_name . '\']');
             }
             
             if ($base_node)
@@ -742,10 +802,11 @@ sub parse_non_complex_element
     
     my $field = {};
     $field->{name} = $element_node->getAttribute('name');
-    $field->{type} = remove_namespace( $element_node->getAttribute('type') );
+    ( $field->{type}, $field->{type_ns} ) = remove_namespace( $element_node->getAttribute('type') );
     $field->{min_occurs} = $element_node->getAttribute('minOccurs') || 1;
     $field->{max_occurs} = $element_node->getAttribute('maxOccurs') || 1;
-
+    ( $field->{ns} ) = _attribute_reverse_search($element_node, 'targetNamespace');
+    
     my $nillable = $element_node->getAttribute('nillable') || 'false';
     $field->{nillable} = $nillable eq 'false' ? 0 : 1;
 
@@ -810,6 +871,7 @@ sub create_type_module
     {
         my $field_name = $field->{name};
         my $field_type = $field->{type};
+        my $field_ns = $field->{ns};
         my $min_occurs = $field->{min_occurs};
         my $max_occurs = $field->{max_occurs};
         my $nillable = $field->{nillable};
@@ -817,7 +879,7 @@ sub create_type_module
         my $is_array = ( ( $max_occurs > 1 ) || ( $max_occurs eq 'unbounded' ) ) ? 1 : 0;
         my $is_complex = $COMPLEX_TYPES{$field_type} ? 1 : 0;
         
-        $module .= $TAB . '$self->_append_field($dom, $type_node, \'' . $field_name . '\', ' . $is_array .', '. $is_complex .', '. $nillable .', '. $min_occurs . ');' . "\n";
+        $module .= $TAB . '$self->_append_field($dom, $type_node, \'' . $field_name . '\', \'' . $field_ns . '\', ' . $is_array .', '. $is_complex .', '. $nillable .', '. $min_occurs . ');' . "\n";
     }
     $module .= "\n";
     $module .= $TAB . 'return $type_node;' . "\n";
@@ -967,10 +1029,14 @@ sub add_object_creation_pod
 
 sub remove_namespace
 {
-    my ($name) = @_;
-    return "" unless $name;
-    $name =~ s/^\w+://;
-    return $name;
+    my ($qualified_name) = @_;
+    
+    return "" unless $qualified_name;
+    
+    my ($ns) = $qualified_name =~ /^(\w+):/;
+    my ($name) = $qualified_name =~ /(\w+)$/;
+    
+    return wantarray ? ($name, $ns) : $name;
 }
 
 =head1 AUTHOR

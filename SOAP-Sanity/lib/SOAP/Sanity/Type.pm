@@ -3,7 +3,7 @@ use Moo;
 
 sub _append_field
 {
-    my ($self, $dom, $parent_node, $field_name, $is_array, $is_complex, $nillable, $min_occurs) = @_;
+    my ($self, $dom, $parent_node, $field_name, $field_ns, $is_array, $is_complex, $nillable, $min_occurs) = @_;
     
     my $namespace = 'm';
     
