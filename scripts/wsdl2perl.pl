@@ -94,6 +94,10 @@ my $wsdl_dom = XML::LibXML->load_xml(
 my $wsdl_root = $wsdl_dom->documentElement;
 #print $wsdl_root->toString(1) . "\n";
 
+# keeps track of namespaces used in requests
+my $ADDED_NAMESPACE_COUNTER = 0;
+my %ADDED_NAMESPACES;
+
 my $SCHEMA_NODE;
 my $SCHEMA_NS;
 my $SOAP_NS;
@@ -306,6 +310,7 @@ foreach my $type_node (@types_nodes)
                 }
                 
                 $SIMPLE_TYPES{$name} = {
+                    node => $type_node,
                     namespace_prefix => $type_prefix,
                     #type_namespace => $type_namespace,
                     target_namespace => $target_namespace,
@@ -320,6 +325,7 @@ foreach my $type_node (@types_nodes)
                 my $fields = parse_complex_type($type_node);
                 
                 $COMPLEX_TYPES{$name} = {
+                    node => $type_node,
                     namespace_prefix => $type_prefix,
                     #type_namespace => $type_namespace,
                     target_namespace => $target_namespace,
@@ -428,7 +434,14 @@ $service .= "extends 'SOAP::Sanity::Service';\n\n";
 $service .= "use ${PACKAGE_PREFIX}::SOAPSanityObjects;\n\n";
 
 $service .= "has service_uri => ( is => 'ro', default => sub { '" . $service_uri . "' } );\n";
-$service .= "has target_namespace => ( is => 'ro', default => sub { '" . $TARGET_NAMESPACE . "' } );\n";
+
+my $namespaces_string = "{ prefix => 'm', ns => '$TARGET_NAMESPACE' }";
+foreach my $namespace ( keys %ADDED_NAMESPACES )
+{
+    my $prefix = $ADDED_NAMESPACES{$namespace};
+    $namespaces_string .= ",\n$TAB$TAB$TAB${TAB}{ prefix => '$prefix', ns => '$namespace' }";
+}
+$service .= "has target_namespaces => ( is => 'ro', default => sub {[ $namespaces_string ]} );\n";
 
 $service .= "\n=head1 NAME\n\n$service_module_name\n";
 $service .= "\n=head1 DESCRIPTION\n\n";
@@ -805,7 +818,7 @@ sub parse_non_complex_element
     ( $field->{type}, $field->{type_ns} ) = remove_namespace( $element_node->getAttribute('type') );
     $field->{min_occurs} = $element_node->getAttribute('minOccurs') || 1;
     $field->{max_occurs} = $element_node->getAttribute('maxOccurs') || 1;
-    ( $field->{ns} ) = _attribute_reverse_search($element_node, 'targetNamespace');
+    ( $field->{target_namespace} ) = _attribute_reverse_search($element_node, 'targetNamespace');
     
     my $nillable = $element_node->getAttribute('nillable') || 'false';
     $field->{nillable} = $nillable eq 'false' ? 0 : 1;
@@ -821,6 +834,7 @@ sub create_type_module
     
     my $type_name = $type->{name} || die "cannot find name of type: " . Dumper($type);
     my $fields = $type->{fields};
+    my $type_target_namespace = $type->{target_namespace};
     
     my $extra_subs = "";
     
@@ -865,21 +879,43 @@ sub create_type_module
     # ...which is actually the method name (document binding is weird)
     # TODO the ||= is a bit ugly here, it would be better if the Type objects knew if they were a root/operation element
     $module .= $TAB . '$field_name ||= ' . "'$type_name';\n";
-    $module .= $TAB . 'my $type_node = $dom->createElement("m:$field_name");' . "\n";
+    if ($type_target_namespace eq $TARGET_NAMESPACE)
+    {
+        $module .= $TAB . 'my $type_node = $dom->createElement("m:$field_name");' . "\n";
+    }
+    else
+    {
+        my $prefix = $ADDED_NAMESPACES{$type_target_namespace};
+        $module .= $TAB . 'my $type_node = $dom->createElement("' . $prefix . ':$field_name");' . "\n";
+    }
     $module .= $TAB . '$parent_node->appendChild($type_node);' . "\n\n";
     foreach my $field (@$fields)
     {
         my $field_name = $field->{name};
         my $field_type = $field->{type};
-        my $field_ns = $field->{ns};
         my $min_occurs = $field->{min_occurs};
         my $max_occurs = $field->{max_occurs};
         my $nillable = $field->{nillable};
+        my $field_target_namespace = $field->{target_namespace};
+        
+        my $field_target_prefix;
+        my $field_target_namespace;
+        if ($field->{target_namespace} ne $TARGET_NAMESPACE)
+        {
+            unless ($ADDED_NAMESPACES{ $field->{target_namespace} })
+            {
+                $ADDED_NAMESPACE_COUNTER++;
+                $ADDED_NAMESPACES{ $field->{target_namespace} } = "m$ADDED_NAMESPACE_COUNTER";
+            }
+            
+            $field_target_prefix = $ADDED_NAMESPACES{ $field->{target_namespace} };
+            $field_target_namespace = $field->{target_namespace};
+        }
         
         my $is_array = ( ( $max_occurs > 1 ) || ( $max_occurs eq 'unbounded' ) ) ? 1 : 0;
         my $is_complex = $COMPLEX_TYPES{$field_type} ? 1 : 0;
         
-        $module .= $TAB . '$self->_append_field($dom, $type_node, \'' . $field_name . '\', \'' . $field_ns . '\', ' . $is_array .', '. $is_complex .', '. $nillable .', '. $min_occurs . ');' . "\n";
+        $module .= $TAB . q|$self->_append_field($dom, $type_node, '| .$field_name. q|', '| .$field_target_prefix. q|', | .$is_array. q|, | .$is_complex. q|, | .$nillable. q|, | .$min_occurs. q|);| . "\n";
     }
     $module .= "\n";
     $module .= $TAB . 'return $type_node;' . "\n";

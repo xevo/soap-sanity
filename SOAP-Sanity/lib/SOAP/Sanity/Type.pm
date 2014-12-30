@@ -3,9 +3,9 @@ use Moo;
 
 sub _append_field
 {
-    my ($self, $dom, $parent_node, $field_name, $field_ns, $is_array, $is_complex, $nillable, $min_occurs) = @_;
+    my ($self, $dom, $parent_node, $field_name, $field_target_prefix_override, $is_array, $is_complex, $nillable, $min_occurs) = @_;
     
-    my $namespace = 'm';
+    my $namespace = $field_target_prefix_override || 'm';
     
     my $value = $self->$field_name;
     if ( defined($value) )
@@ -31,7 +31,8 @@ sub _append_field
                 {
                     if ( defined($array_value) )
                     {
-                        $field_node->appendTextChild("$namespace:$field_name", "$array_value");
+                        my $value_node = $dom->createElement("$namespace:$field_name");
+                        $value_node->appendTextNode($array_value);
                     }
                     elsif ($nillable)
                     {
@@ -54,7 +55,9 @@ sub _append_field
         }
         else
         {
-            $parent_node->appendTextChild("$namespace:$field_name", "$value");
+            my $value_node = $dom->createElement("$namespace:$field_name");
+            $value_node->appendTextNode($value);
+            $parent_node->appendChild($value_node);
         }
     }
     elsif ($nillable)

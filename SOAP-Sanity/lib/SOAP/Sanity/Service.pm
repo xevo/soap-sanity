@@ -36,19 +36,26 @@ sub _make_document_request
     # The element MAY contain a set of body entries each being an immediate child element of the SOAP Body element.
     # Immediate child elements of the SOAP Body element MAY be namespace-qualified.
     
-    my $dom = $self->parser->load_xml(
-          string => q|<?xml version="1.0" encoding="UTF-8"?>
-            <soap:Envelope
-                xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-                xmlns:xsd="http://www.w3.org/2001/XMLSchema"
-                xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"
-                xmlns:m="| . $self->target_namespace . q|"
-                >
-                    <soap:Header/>
-                    <soap:Body/>
-            </soap:Envelope>
-            |
-    );
+    my $root_string =q|<?xml version="1.0" encoding="UTF-8"?>
+        <soap:Envelope
+            xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+            xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+            xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"
+            |;
+            foreach my $namespace (@{ $self->target_namespaces })
+            {
+                my $prefix = $namespace->{prefix};
+                my $ns = $namespace->{ns};
+                $root_string .= "xmlns:$prefix=\"$ns\"\n            ";
+            }
+            $root_string .= q|
+            >
+                <soap:Header/>
+                <soap:Body/>
+        </soap:Envelope>
+        |;
+    
+    my $dom = $self->parser->load_xml( string => $root_string );
     
     my $root = $dom->documentElement;
     
