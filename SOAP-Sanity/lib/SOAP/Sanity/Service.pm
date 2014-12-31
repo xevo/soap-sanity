@@ -3,6 +3,7 @@ use Moo;
 
 use Scalar::Util qw(blessed);
 use LWP::UserAgent;
+push(@LWP::Prococol::http::EXTRA_SOCK_OPTS, SendTE => 0);
 use XML::LibXML;
 use Data::Dumper;
 
@@ -10,7 +11,7 @@ use SOAP::Sanity;
 use SOAP::Sanity::Exceptions;
 
 has agent => ( is => 'ro', default => sub { LWP::UserAgent->new(keep_alive => 3, agent => "SOAP::Sanity $SOAP::Sanity::VERSION") } );
-has parser => ( is => 'ro', default => sub { XML::LibXML->new } );
+has parser => ( is => 'ro', default => sub { XML::LibXML->new(); } );
 
 sub _make_document_request
 {
@@ -37,10 +38,8 @@ sub _make_document_request
     # Immediate child elements of the SOAP Body element MAY be namespace-qualified.
     
     my $root_string =q|<?xml version="1.0" encoding="UTF-8"?>
-        <soap:Envelope
-            xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-            xmlns:xsd="http://www.w3.org/2001/XMLSchema"
-            xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"
+        <SOAP-ENV:Envelope
+            xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/"
             |;
             foreach my $namespace (@{ $self->target_namespaces })
             {
@@ -50,16 +49,14 @@ sub _make_document_request
             }
             $root_string .= q|
             >
-                <soap:Header/>
-                <soap:Body/>
-        </soap:Envelope>
-        |;
+                <SOAP-ENV:Body/>
+        </SOAP-ENV:Envelope>|;
     
     my $dom = $self->parser->load_xml( string => $root_string );
     
     my $root = $dom->documentElement;
     
-    my ($body) = $root->findnodes('soap:Body');
+    my ($body) = $root->findnodes('SOAP-ENV:Body');
     
     $request->_serialize($dom, $body);
     
@@ -67,7 +64,7 @@ sub _make_document_request
     
     my %headers;
     $headers{'Content-Type'} = 'text/xml; charset=utf-8';
-    $headers{'SOAPAction'} = $soap_action if $soap_action;
+    $headers{'SOAPAction'} = '"' . $soap_action . '"' if $soap_action;
     
     return $self->_post($request_xml, \%headers);
 }
@@ -103,21 +100,21 @@ sub _make_rpc_request
     
     my $dom = $self->parser->load_xml(
           string => q|<?xml version="1.0" encoding="UTF-8"?>
-            <soap:Envelope
+            <SOAP-ENV:Envelope
                 xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
                 xmlns:xsd="http://www.w3.org/2001/XMLSchema"
-                xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"
+                xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/"
                 xmlns:m="| . $self->target_namespace . q|"
                 >
-                    <soap:Header/>
-                    <soap:Body/>
-            </soap:Envelope>
+                    <SOAP-ENV:Header/>
+                    <SOAP-ENV:Body/>
+            </SOAP-ENV:Envelope>
             |
     );
     
     my $root = $dom->documentElement;
     
-    my ($body) = $root->findnodes('soap:Body');
+    my ($body) = $root->findnodes('SOAP-ENV:Body');
     
     # document binding doesn't get an extra root node
     my $method_node = $body;

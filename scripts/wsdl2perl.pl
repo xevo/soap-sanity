@@ -202,7 +202,7 @@ foreach my $type_node (@types_nodes)
 {
     print "found types element: " . $type_node->nodeName . "\n";
     
-    foreach my $schema_node ( $type_node->childNodes )
+    foreach my $schema_node (@{ $type_node->childNodes })
     {
         my ($node_name, $node_namespace) = remove_namespace( $schema_node->nodeName );
         next unless $node_name eq 'schema';
@@ -213,6 +213,9 @@ foreach my $type_node (@types_nodes)
         $SCHEMA_NS = $node_namespace;
         
         print "schema namespace: $SCHEMA_NS\n";
+        
+        my $schema_target_namespace = $schema_node->findvalue('@targetNamespace');
+        print "schema targetNamespace: $schema_target_namespace\n" if $schema_target_namespace;
         
         foreach my $node ( $schema_node->childNodes )
         {
@@ -255,7 +258,7 @@ foreach my $type_node (@types_nodes)
             my ($type, $type_prefix) = remove_namespace( $type_node->getAttribute('type') );
             
             my ($target_namespace) = _attribute_reverse_search($type_node, 'targetNamespace');
-            warn "cannot find attribute - targetNamespace" unless $target_namespace;
+            die "cannot find attribute - targetNamespace" unless $target_namespace;
             
             #my ($type_namespace) = _attribute_reverse_search($type_node, 'xmlns:' . $type_prefix);
             #warn "cannot find attribute - xmlns:$type_prefix" unless $type_namespace;
@@ -284,15 +287,24 @@ foreach my $type_node (@types_nodes)
             my $sequence_type = remove_namespace( $type_node->findvalue($SCHEMA_NS.':sequence/'.$SCHEMA_NS.':element/@type') );
             if (( $sequence_type ) && ( $sequence_type eq $name ))
             {
-                # this is just an element redefining this type...skip it
-                next TYPE_NODES;
+                my ($complex_type) = $schema_node->findnodes($SCHEMA_NS.':complexType[@name=\'' .$name. '\']');
+                if ($complex_type)
+                {
+                    # this is just an element redefining this type...skip it
+                    next TYPE_NODES;
+                }
             }
             
             if ($node_name eq 'simpleType')
             {
-                die "$name simple type already exists!: " . Dumper($SIMPLE_TYPES{$name}) if $SIMPLE_TYPES{$name};
+                if ( $SIMPLE_TYPES{$name} )
+                {
+                    # TODO I'm sure there is a valid reason it is defined twice, I probably shouldn't be ignoring it
+                    warn "$name simple type already exists!: " . Dumper($SIMPLE_TYPES{$name});
+                    next TYPE_NODES;
+                }
                 
-                warn "found simpleType: $name";
+                warn "found simpleType: $name ($target_namespace)";
                 
                 my $base_type = remove_namespace( $type_node->findvalue($SCHEMA_NS.':restriction/@base') );
                 $base_type = $type unless ($base_type);
@@ -309,6 +321,11 @@ foreach my $type_node (@types_nodes)
                     %enum = ( enum => \@enum );
                 }
                 
+                if ($SIMPLE_TYPES{$name})
+                {
+                    die "the $name simple type is already defined";
+                }
+                
                 $SIMPLE_TYPES{$name} = {
                     node => $type_node,
                     namespace_prefix => $type_prefix,
@@ -320,9 +337,21 @@ foreach my $type_node (@types_nodes)
             }
             else
             {
-                die "$name complex type already exists!: " . Dumper($COMPLEX_TYPES{$name}) if $COMPLEX_TYPES{$name};
+                if ( $COMPLEX_TYPES{$name} )
+                {
+                    # TODO I'm sure there is a valid reason it is defined twice, I probably shouldn't be ignoring it
+                    warn "$name complex type already exists!: " . Dumper($COMPLEX_TYPES{$name});
+                    next TYPE_NODES;
+                }
                 
-                my $fields = parse_complex_type($type_node);
+                warn "found complexType: $name ($target_namespace)";
+                
+                my $fields = parse_complex_type($type_node, $target_namespace);
+                
+                if ($COMPLEX_TYPES{$name})
+                {
+                    die "the $name complex type is already defined";
+                }
                 
                 $COMPLEX_TYPES{$name} = {
                     node => $type_node,
@@ -333,7 +362,7 @@ foreach my $type_node (@types_nodes)
                     fields => $fields,
                 };
                 
-                print "found complex type:\n";
+                print "found complex type: ";
                 print Dumper($COMPLEX_TYPES{$name}) . "\n";
             }
         }
@@ -435,7 +464,7 @@ $service .= "use ${PACKAGE_PREFIX}::SOAPSanityObjects;\n\n";
 
 $service .= "has service_uri => ( is => 'ro', default => sub { '" . $service_uri . "' } );\n";
 
-my $namespaces_string = "{ prefix => 'm', ns => '$TARGET_NAMESPACE' }";
+my $namespaces_string = "{ prefix => 'm0', ns => '$TARGET_NAMESPACE' }";
 foreach my $namespace ( keys %ADDED_NAMESPACES )
 {
     my $prefix = $ADDED_NAMESPACES{$namespace};
@@ -608,15 +637,26 @@ foreach my $method_name ( sort keys %METHODS )
     $service .= $TAB . 'my ($self, %args) = @_;' . "\n";
     if ( $method->{binding} eq 'document' )
     {
-        my $message_part = $method->{input_parts}->[0];
-        my $part_name = $message_part->{name};
-        my $part_type = $message_part->{type} || $message_part->{element};
-        my $type = $COMPLEX_TYPES{$part_type};
-        my $type_name = $type->{name};
+        # determine request class
         
-        my $request_class = $PACKAGE_PREFIX . '::' . ($type->{name} || $method_name);
+        my $input_message_part = $method->{input_parts}->[0];
+        my $input_part_type = $input_message_part->{type} || $input_message_part->{element};
+        my $input_type = $COMPLEX_TYPES{$input_part_type};
         
-        my $response_class = $PACKAGE_PREFIX . '::' . $output;
+        die "cannot determine response type for method $method_name" unless $input_type->{name};
+        
+        #my $request_class = $PACKAGE_PREFIX . '::' . ($input_type->{name} || $method_name);
+        my $request_class = $PACKAGE_PREFIX . '::' . $input_type->{name};
+        
+        # determine response class
+        
+        my $output_message_part = $method->{output_parts}->[0];
+        my $output_part_type = $output_message_part->{type} || $output_message_part->{element};
+        my $output_type = $COMPLEX_TYPES{$output_part_type};
+        
+        die "cannot determine response type for method $method_name" unless $output_type->{name};
+        
+        my $response_class = $PACKAGE_PREFIX . '::' . $output_type->{name};
         
         $service .= $TAB . 'my $message = ' . $request_class . '->new(%args);' . "\n";
         $service .= $TAB . 'my $response_node = $self->_make_document_request($message, \'' . $soap_action . '\');' . "\n";
@@ -685,7 +725,7 @@ sub load_xml_as_string
 
 sub parse_complex_type
 {
-    my ($type_node) = @_;
+    my ($type_node, $field_target_namespace) = @_;
     
     my @fields;
     
@@ -700,7 +740,7 @@ sub parse_complex_type
     
     if ($type)
     {
-        push(@fields, parse_non_complex_element($type_node));
+        push(@fields, parse_non_complex_element($type_node, $field_target_namespace));
     }
     else
     {
@@ -708,10 +748,12 @@ sub parse_complex_type
         {
             my $node_name = remove_namespace( $node->nodeName );
             print "Parsing node: $node_name\n";
-
+            
+            my $namespace_prefix;
+            
             if ( $node_name eq 'sequence' || $node_name eq 'all' )
             {
-                push(@fields, parse_sequence($node));
+                push(@fields, parse_sequence($node, $field_target_namespace));
             }
             elsif ( $node_name eq 'complexContent' )
             {
@@ -736,7 +778,7 @@ sub parse_complex_type
                             
                             # TODO "choice" could be a parent
                             my ($base_sequence) = $base_node->findnodes("$SCHEMA_NS:sequence|$SCHEMA_NS:all");
-                            push(@fields, parse_sequence($base_sequence));
+                            push(@fields, parse_sequence($base_sequence, $field_target_namespace));
                         }
                         else
                         {
@@ -747,7 +789,7 @@ sub parse_complex_type
                         
                         # TODO "choice" could be a parent
                         my ($additional_sequence) = $extension_node->findnodes("$SCHEMA_NS:sequence|$SCHEMA_NS:all");
-                        push(@fields, parse_sequence($additional_sequence));
+                        push(@fields, parse_sequence($additional_sequence, $field_target_namespace));
                     }
                 }
             }
@@ -765,7 +807,7 @@ sub parse_complex_type
 # returns an array of fields
 sub parse_sequence
 {
-    my ($sequence_node) = @_;
+    my ($sequence_node, $field_target_namespace) = @_;
     
     my @fields;
     
@@ -797,12 +839,12 @@ sub parse_sequence
                 
                 # TODO "choice" could be a parent
                 my ($base_sequence) = $base_node->findnodes("$SCHEMA_NS:sequence|$SCHEMA_NS:all");
-                push(@fields, parse_sequence($base_sequence));
+                push(@fields, parse_sequence($base_sequence, $field_target_namespace));
             }
         }
         else
         {
-            push(@fields, parse_non_complex_element($element_node));
+            push(@fields, parse_non_complex_element($element_node, $field_target_namespace));
         }
     }
     
@@ -811,14 +853,16 @@ sub parse_sequence
 
 sub parse_non_complex_element
 {
-    my ($element_node) = @_;
+    my ($element_node, $field_target_namespace) = @_;
     
     my $field = {};
     $field->{name} = $element_node->getAttribute('name');
     ( $field->{type}, $field->{type_ns} ) = remove_namespace( $element_node->getAttribute('type') );
     $field->{min_occurs} = $element_node->getAttribute('minOccurs') || 1;
     $field->{max_occurs} = $element_node->getAttribute('maxOccurs') || 1;
-    ( $field->{target_namespace} ) = _attribute_reverse_search($element_node, 'targetNamespace');
+    
+    #( $field->{target_namespace} ) = _attribute_reverse_search($element_node, 'targetNamespace');
+    $field->{target_namespace} = $field_target_namespace;
     
     my $nillable = $element_node->getAttribute('nillable') || 'false';
     $field->{nillable} = $nillable eq 'false' ? 0 : 1;
@@ -874,20 +918,22 @@ sub create_type_module
     
     $module .= "\nsub _serialize\n";
     $module .= "{\n";
-    $module .= $TAB . 'my ($self, $dom, $parent_node, $field_name) = @_;' . "\n\n";
+    $module .= $TAB . 'my ($self, $dom, $parent_node, $field_name, $namespace_prefix_override) = @_;' . "\n\n";
+    $module .= $TAB . q~my $namespace = $namespace_prefix_override || 'm0';~ . "\n";
     # the first element in the body will not get the $field_name passed in, so default to the type name
     # ...which is actually the method name (document binding is weird)
     # TODO the ||= is a bit ugly here, it would be better if the Type objects knew if they were a root/operation element
     $module .= $TAB . '$field_name ||= ' . "'$type_name';\n";
-    if ($type_target_namespace eq $TARGET_NAMESPACE)
-    {
-        $module .= $TAB . 'my $type_node = $dom->createElement("m:$field_name");' . "\n";
-    }
-    else
-    {
-        my $prefix = $ADDED_NAMESPACES{$type_target_namespace};
-        $module .= $TAB . 'my $type_node = $dom->createElement("' . $prefix . ':$field_name");' . "\n";
-    }
+    $module .= $TAB . 'my $type_node = $dom->createElement("$namespace:$field_name");' . "\n";
+    # if ($type_target_namespace eq $TARGET_NAMESPACE)
+    # {
+    #     $module .= $TAB . 'my $type_node = $dom->createElement("m0:$field_name");' . "\n";
+    # }
+    # else
+    # {
+    #     my $prefix = $ADDED_NAMESPACES{$type_target_namespace};
+    #     $module .= $TAB . 'my $type_node = $dom->createElement("' . $prefix . ':$field_name");' . "\n";
+    # }
     $module .= $TAB . '$parent_node->appendChild($type_node);' . "\n\n";
     foreach my $field (@$fields)
     {
@@ -912,10 +958,12 @@ sub create_type_module
             $field_target_namespace = $field->{target_namespace};
         }
         
+        my $type_target_namespace = $ADDED_NAMESPACES{$type_target_namespace};
+        
         my $is_array = ( ( $max_occurs > 1 ) || ( $max_occurs eq 'unbounded' ) ) ? 1 : 0;
         my $is_complex = $COMPLEX_TYPES{$field_type} ? 1 : 0;
         
-        $module .= $TAB . q|$self->_append_field($dom, $type_node, '| .$field_name. q|', '| .$field_target_prefix. q|', | .$is_array. q|, | .$is_complex. q|, | .$nillable. q|, | .$min_occurs. q|);| . "\n";
+        $module .= $TAB . q|$self->_append_field($dom, $type_node, '| .$field_name. q|', '| .$type_target_namespace. q|', | .$is_array. q|, | .$is_complex. q|, | .$nillable. q|, | .$min_occurs. q|);| . "\n";
     }
     $module .= "\n";
     $module .= $TAB . 'return $type_node;' . "\n";
