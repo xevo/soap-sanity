@@ -725,7 +725,7 @@ sub load_xml_as_string
 
 sub parse_complex_type
 {
-    my ($type_node, $field_target_namespace) = @_;
+    my ($type_node, $field_target_namespace, $prefix_override) = @_;
     
     my @fields;
     
@@ -746,7 +746,7 @@ sub parse_complex_type
     {
         foreach my $node ( $type_node->childNodes )
         {
-            my $node_name = remove_namespace( $node->nodeName );
+            my ($node_name, $node_prefix) = remove_namespace( $node->nodeName );
             print "Parsing node: $node_name\n";
             
             my $namespace_prefix;
@@ -760,7 +760,7 @@ sub parse_complex_type
                 print "looking for extensions...\n";
                 foreach my $extension_node ( $node->findnodes($SCHEMA_NS.':extension') )
                 {
-                    my $base_name = remove_namespace( $extension_node->findvalue('@base') );
+                    my ($base_name, $base_prefix) = remove_namespace( $extension_node->findvalue('@base') );
                     if ($base_name)
                     {
                         print "found extension base: $base_name\n";
@@ -778,7 +778,8 @@ sub parse_complex_type
                             
                             # TODO "choice" could be a parent
                             my ($base_sequence) = $base_node->findnodes("$SCHEMA_NS:sequence|$SCHEMA_NS:all");
-                            push(@fields, parse_sequence($base_sequence, $field_target_namespace));
+                            # pass the $base_prefix of this base type so that the parent type can inherit it
+                            push(@fields, parse_sequence($base_sequence, $field_target_namespace, $base_prefix));
                         }
                         else
                         {
@@ -789,7 +790,8 @@ sub parse_complex_type
                         
                         # TODO "choice" could be a parent
                         my ($additional_sequence) = $extension_node->findnodes("$SCHEMA_NS:sequence|$SCHEMA_NS:all");
-                        push(@fields, parse_sequence($additional_sequence, $field_target_namespace));
+                        # pass the $base_prefix of this base type so that the parent type can inherit it
+                        push(@fields, parse_sequence($additional_sequence, $field_target_namespace, $base_prefix));
                     }
                 }
             }
@@ -807,7 +809,7 @@ sub parse_complex_type
 # returns an array of fields
 sub parse_sequence
 {
-    my ($sequence_node, $field_target_namespace) = @_;
+    my ($sequence_node, $field_target_namespace, $prefix_override) = @_;
     
     my @fields;
     
@@ -853,16 +855,23 @@ sub parse_sequence
 
 sub parse_non_complex_element
 {
-    my ($element_node, $field_target_namespace) = @_;
+    my ($element_node, $field_target_namespace, $prefix_override) = @_;
     
     my $field = {};
+    
     $field->{name} = $element_node->getAttribute('name');
-    ( $field->{type}, $field->{type_ns} ) = remove_namespace( $element_node->getAttribute('type') );
-    $field->{min_occurs} = $element_node->getAttribute('minOccurs') || 1;
-    $field->{max_occurs} = $element_node->getAttribute('maxOccurs') || 1;
     
     #( $field->{target_namespace} ) = _attribute_reverse_search($element_node, 'targetNamespace');
     $field->{target_namespace} = $field_target_namespace;
+    
+    ( $field->{type}, $field->{type_ns} ) = remove_namespace( $element_node->getAttribute('type') );
+    if ($prefix_override)
+    {
+        $field->{prefix_override} = $prefix_override;
+    }
+    
+    $field->{min_occurs} = $element_node->getAttribute('minOccurs') || 1;
+    $field->{max_occurs} = $element_node->getAttribute('maxOccurs') || 1;
     
     my $nillable = $element_node->getAttribute('nillable') || 'false';
     $field->{nillable} = $nillable eq 'false' ? 0 : 1;
@@ -958,12 +967,16 @@ sub create_type_module
             $field_target_namespace = $field->{target_namespace};
         }
         
-        my $type_target_namespace = $ADDED_NAMESPACES{$type_target_namespace};
+        my $type_target_prefix = $ADDED_NAMESPACES{$type_target_namespace};
+        if ( $field->{prefix_override} )
+        {
+            $type_target_prefix = $field->{prefix_override};
+        }
         
         my $is_array = ( ( $max_occurs > 1 ) || ( $max_occurs eq 'unbounded' ) ) ? 1 : 0;
         my $is_complex = $COMPLEX_TYPES{$field_type} ? 1 : 0;
         
-        $module .= $TAB . q|$self->_append_field($dom, $type_node, '| .$field_name. q|', '| .$type_target_namespace. q|', | .$is_array. q|, | .$is_complex. q|, | .$nillable. q|, | .$min_occurs. q|);| . "\n";
+        $module .= $TAB . q|$self->_append_field($dom, $type_node, '| .$field_name. q|', '| .$type_target_prefix. q|', | .$is_array. q|, | .$is_complex. q|, | .$nillable. q|, | .$min_occurs. q|);| . "\n";
     }
     $module .= "\n";
     $module .= $TAB . 'return $type_node;' . "\n";
