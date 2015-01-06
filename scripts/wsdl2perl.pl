@@ -99,39 +99,29 @@ my $ADDED_NAMESPACE_COUNTER = 0;
 my %ADDED_NAMESPACES;
 
 my $SCHEMA_NODE;
-my $SCHEMA_NS;
-my $SOAP_NS;
-my $WSDL_NS;
-my $TARGET_NAMESPACE;
+
 print "processing root attributes:\n";
+my %ROOT_ATTRIBUTES;
+my %ROOT_ATTRIBUTES_REVERSE;
 foreach my $attr ( $wsdl_root->attributes )
 {
     my $name = remove_namespace( $attr->nodeName );
     my $value = $attr->value;
     
-    print "\t" . $name . " = $value\n";
-    
-    if ( $value =~ m{^https?://www.w3.org/2001/XMLSchema/?$}i )
-    {
-        $SCHEMA_NS = $name;
-    }
-    elsif ( $value =~ m{^https?://schemas.xmlsoap.org/wsdl/soap/?$}i )
-    {
-        $SOAP_NS = $name;
-    }
-    elsif ( $value =~ m{^https?://schemas.xmlsoap.org/wsdl/?$}i )
-    {
-        $WSDL_NS = $name;
-    }
-    elsif ( $name eq 'targetNamespace' )
-    {
-        $TARGET_NAMESPACE = $value;
-    }
+    $ROOT_ATTRIBUTES{$name} = $value;
+    $ROOT_ATTRIBUTES_REVERSE{$value} = $name;
 }
+my $SCHEMA_NS = $ROOT_ATTRIBUTES_REVERSE{'http://www.w3.org/2001/XMLSchema'};
+my $SOAP_NS = $ROOT_ATTRIBUTES_REVERSE{'http://schemas.xmlsoap.org/wsdl/soap/'};
+my $WSDL_NS = $ROOT_ATTRIBUTES_REVERSE{'http://schemas.xmlsoap.org/wsdl/'};
+my $TARGET_NAMESPACE = $ROOT_ATTRIBUTES{'targetNamespace'};
+my $DEFAULT_NAMESPACE_PREFIX = $ROOT_ATTRIBUTES_REVERSE{$TARGET_NAMESPACE} || "";
+
 warn "cannot find schema namespace in WSDL root node (it's probably defined on the schema element(s)" unless $SCHEMA_NS;
 die "cannot find soap namespace in WSDL root node" unless $SOAP_NS;
 die "cannot find wsdl namespace in WSDL root node" unless $WSDL_NS;
 die "cannot find target namespace in WSDL root node" unless $TARGET_NAMESPACE;
+warn "cannot find default namespace prefix for namesapce $TARGET_NAMESPACE" unless $DEFAULT_NAMESPACE_PREFIX;
 
 unless ($PACKAGE_PREFIX)
 {
@@ -337,10 +327,10 @@ foreach my $type_node (@types_nodes)
             }
             else
             {
-                if ( $COMPLEX_TYPES{$name} )
+                if ( $COMPLEX_TYPES{$type_prefix}->{$name} )
                 {
                     # TODO I'm sure there is a valid reason it is defined twice, I probably shouldn't be ignoring it
-                    warn "$name complex type already exists!: " . Dumper($COMPLEX_TYPES{$name});
+                    warn "$name complex type already exists!: " . Dumper($COMPLEX_TYPES{$type_prefix}{$name});
                     next TYPE_NODES;
                 }
                 
@@ -348,12 +338,12 @@ foreach my $type_node (@types_nodes)
                 
                 my $fields = parse_complex_type($type_node, $target_namespace);
                 
-                if ($COMPLEX_TYPES{$name})
+                if ($COMPLEX_TYPES{$type_prefix}{$name})
                 {
                     die "the $name complex type is already defined";
                 }
                 
-                $COMPLEX_TYPES{$name} = {
+                $COMPLEX_TYPES{$type_prefix}{$name} = {
                     node => $type_node,
                     namespace_prefix => $type_prefix,
                     #type_namespace => $type_namespace,
@@ -363,7 +353,7 @@ foreach my $type_node (@types_nodes)
                 };
                 
                 print "found complex type: ";
-                print Dumper($COMPLEX_TYPES{$name}) . "\n";
+                print Dumper($COMPLEX_TYPES{$type_prefix}{$name}) . "\n";
             }
         }
     }
@@ -441,10 +431,13 @@ print "save path: $save_path\n";
 make_path($save_path);
 
 my $module_use_statement = "";
-foreach my $type ( sort { $a->{name} cmp $b->{name} } values %COMPLEX_TYPES )
+foreach my $type_ns ( values %COMPLEX_TYPES )
 {
-    my ($module_name, $module_path) = create_type_module($type);
-    $module_use_statement .= "use $module_name;\n";
+    foreach my $type ( values %$type_ns )
+    {
+        my ($module_name, $module_path) = create_type_module($type_ns, $type);
+        $module_use_statement .= "use $module_name;\n";
+    }
 }
 
 open(my $fh, ">", "$save_path/SOAPSanityObjects.pm") or die "cannot create $save_path/SOAPSanityObjects.pm: $!";
@@ -661,7 +654,7 @@ foreach my $method_name ( sort keys %METHODS )
         $service .= $TAB . 'my $message = ' . $request_class . '->new(%args);' . "\n";
         $service .= $TAB . 'my $response_node = $self->_make_document_request($message, \'' . $soap_action . '\');' . "\n";
         $service .= $TAB . 'my $response_object = ' . $response_class . '->new();' . "\n";
-        $service .= $TAB . '$response_object->_unserialize($response_node->findnodes("Body/' . $output . '"));' . "\n";
+        $service .= $TAB . '$response_object->_unserialize($response_node->findnodes("Body/' . $output_part_type . '"));' . "\n";
         $service .= $TAB . 'return $response_object;' . "\n";
     }
     else
@@ -883,7 +876,7 @@ sub parse_non_complex_element
 
 sub create_type_module
 {
-    my ($type) = @_;
+    my ($type_ns, $type) = @_;
     
     my $type_name = $type->{name} || die "cannot find name of type: " . Dumper($type);
     my $fields = $type->{fields};
