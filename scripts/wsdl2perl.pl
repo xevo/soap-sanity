@@ -169,13 +169,31 @@ foreach my $message_node ( $wsdl_root->findnodes('//'.$WSDL_NS.':message') )
     foreach my $part ( $message_node->findnodes($WSDL_NS.':part') )
     {
         my $part_name = remove_namespace( $part->findvalue('@name') );
-        my $element = remove_namespace( $part->findvalue('@element') );
-        my $type = remove_namespace( $part->findvalue('@type') );
+        
+        my ($element, $element_namespace_prefix) = remove_namespace( $part->findvalue('@element') );
+        
+        my $element_namespace;
+        if ($element_namespace_prefix)
+        {
+            ( $element_namespace ) = _attribute_reverse_search($part, 'xmlns:' . $element_namespace_prefix);
+        }
+        
+        my ($type, $type_namespace_prefix) = remove_namespace( $part->findvalue('@type') );
+        
+        my $type_namespace;
+        if ($type_namespace_prefix)
+        {
+            ( $type_namespace ) = _attribute_reverse_search($part, 'xmlns:' . $type_namespace_prefix);
+        }
+        
+        # I don't think this should ever happen in a valid XSD schema
+        die "found both a type and an element attribute on $message_name part $part_name...cannot continue" if ( $element && $type );
         
         push(@parts, {
             name => $part_name,
             element => $element,
             type => $type,
+            namespace => ( $element_namespace || $type_namespace || $TARGET_NAMESPACE ),
         });
     }
     
@@ -204,8 +222,8 @@ foreach my $type_node (@types_nodes)
         
         print "schema namespace: $SCHEMA_NS\n";
         
-        my $schema_target_namespace = $schema_node->findvalue('@targetNamespace');
-        print "schema targetNamespace: $schema_target_namespace\n" if $schema_target_namespace;
+        my $schema_target_namespace = $schema_node->findvalue('@targetNamespace') || $TARGET_NAMESPACE;
+        die "cannot find schema targetNamespace" unless $schema_target_namespace;
         
         foreach my $node ( $schema_node->childNodes )
         {
@@ -327,10 +345,10 @@ foreach my $type_node (@types_nodes)
             }
             else
             {
-                if ( $COMPLEX_TYPES{$type_prefix}->{$name} )
+                if ( $COMPLEX_TYPES{$schema_target_namespace}->{$name} )
                 {
                     # TODO I'm sure there is a valid reason it is defined twice, I probably shouldn't be ignoring it
-                    warn "$name complex type already exists!: " . Dumper($COMPLEX_TYPES{$type_prefix}{$name});
+                    warn "$name complex type already exists!: " . Dumper($COMPLEX_TYPES{$schema_target_namespace}->{$name});
                     next TYPE_NODES;
                 }
                 
@@ -338,22 +356,23 @@ foreach my $type_node (@types_nodes)
                 
                 my $fields = parse_complex_type($type_node, $target_namespace);
                 
-                if ($COMPLEX_TYPES{$type_prefix}{$name})
+                if ($COMPLEX_TYPES{$schema_target_namespace}->{$name})
                 {
                     die "the $name complex type is already defined";
                 }
                 
-                $COMPLEX_TYPES{$type_prefix}{$name} = {
+                $COMPLEX_TYPES{$schema_target_namespace}->{$name} = {
                     node => $type_node,
                     namespace_prefix => $type_prefix,
                     #type_namespace => $type_namespace,
                     target_namespace => $target_namespace,
                     name => $name,
                     fields => $fields,
+                    package_name => namespace_to_package_name($schema_target_namespace),
                 };
                 
                 print "found complex type: ";
-                print Dumper($COMPLEX_TYPES{$type_prefix}{$name}) . "\n";
+                print Dumper($COMPLEX_TYPES{$schema_target_namespace}->{$name}) . "\n";
             }
         }
     }
@@ -431,11 +450,12 @@ print "save path: $save_path\n";
 make_path($save_path);
 
 my $module_use_statement = "";
-foreach my $type_ns ( values %COMPLEX_TYPES )
+foreach my $target_namespace ( keys %COMPLEX_TYPES )
 {
-    foreach my $type ( values %$type_ns )
+    my $types = $COMPLEX_TYPES{$target_namespace};
+    foreach my $type ( values %$types )
     {
-        my ($module_name, $module_path) = create_type_module($type_ns, $type);
+        my ($module_name, $module_path) = create_type_module($target_namespace, $type);
         $module_use_statement .= "use $module_name;\n";
     }
 }
@@ -510,12 +530,13 @@ foreach my $method_name ( sort keys %METHODS )
     {
         my $part_name = $part->{name};
         my $part_type = $part->{type} || $part->{element};
+        my $part_namespace = $part->{namespace};
         
         # complex type
-        if ($COMPLEX_TYPES{$part_type})
+        if ($COMPLEX_TYPES{$part_namespace}->{$part_type})
         {
             my $is_document_root = ( $method->{binding} eq 'document' ) ? 1 : 0;
-            add_object_creation_pod($is_document_root, \$service, $COMPLEX_TYPES{$part_type});
+            add_object_creation_pod($is_document_root, \$service, $COMPLEX_TYPES{$part_namespace}->{$part_type});
         }
         # simple type?
         else
@@ -537,18 +558,21 @@ foreach my $method_name ( sort keys %METHODS )
         my $first_part = $method->{input_parts}->[0];
         my $part_name = $first_part->{name};
         my $part_type = $first_part->{type} || $first_part->{element};
-        if ($COMPLEX_TYPES{$part_type})
+        my $part_namespace = $first_part->{namespace};
+        
+        if ($COMPLEX_TYPES{$part_namespace}->{$part_type})
         {
-            foreach my $field (@{ $COMPLEX_TYPES{$part_type}->{fields} })
+            foreach my $field (@{ $COMPLEX_TYPES{$part_namespace}->{$part_type}->{fields} })
             {
                 my $field_name = $field->{name};
                 my $field_type = $field->{type};
+                my $field_type_namespace = $field->{type_namespace};
                 my $min_occurs = $field->{min_occurs};
                 my $max_occurs = $field->{max_occurs};
                 my $nillable = $field->{nillable};
                 
                 my $variable_name;
-                if ($COMPLEX_TYPES{$field_type})
+                if ($COMPLEX_TYPES{$field_type_namespace}->{$field_type})
                 {
                     $variable_name = "\$$field_name";
                 }
@@ -588,9 +612,10 @@ foreach my $method_name ( sort keys %METHODS )
         {
             my $part_name = $part->{name};
             my $part_type = $part->{type} || $part->{element};
-
+            my $part_namespace = $part->{namespace};
+            
             my $variable_name;
-            if ($COMPLEX_TYPES{$part_type})
+            if ($COMPLEX_TYPES{$part_namespace}->{$part_type})
             {
                 $variable_name = "\$$part_type,";
             }
@@ -634,22 +659,26 @@ foreach my $method_name ( sort keys %METHODS )
         
         my $input_message_part = $method->{input_parts}->[0];
         my $input_part_type = $input_message_part->{type} || $input_message_part->{element};
-        my $input_type = $COMPLEX_TYPES{$input_part_type};
+        my $input_part_type_namespace = $input_message_part->{namespace};
+        my $input_type = $COMPLEX_TYPES{$input_part_type_namespace}->{$input_part_type};
+        my $input_package_name = $input_type->{package_name};
         
         die "cannot determine response type for method $method_name" unless $input_type->{name};
         
         #my $request_class = $PACKAGE_PREFIX . '::' . ($input_type->{name} || $method_name);
-        my $request_class = $PACKAGE_PREFIX . '::' . $input_type->{name};
+        my $request_class = $PACKAGE_PREFIX . '::' . $input_package_name . '::' . $input_type->{name};
         
         # determine response class
         
         my $output_message_part = $method->{output_parts}->[0];
         my $output_part_type = $output_message_part->{type} || $output_message_part->{element};
-        my $output_type = $COMPLEX_TYPES{$output_part_type};
+        my $output_part_type_namespace = $input_message_part->{namespace};
+        my $output_type = $COMPLEX_TYPES{$output_part_type_namespace}->{$output_part_type};
+        my $output_package_name = $output_type->{package_name};
         
         die "cannot determine response type for method $method_name" unless $output_type->{name};
         
-        my $response_class = $PACKAGE_PREFIX . '::' . $output_type->{name};
+        my $response_class = $PACKAGE_PREFIX . '::' . $output_package_name . '::' . $output_type->{name};
         
         $service .= $TAB . 'my $message = ' . $request_class . '->new(%args);' . "\n";
         $service .= $TAB . 'my $response_node = $self->_make_document_request($message, \'' . $soap_action . '\');' . "\n";
@@ -857,7 +886,19 @@ sub parse_non_complex_element
     #( $field->{target_namespace} ) = _attribute_reverse_search($element_node, 'targetNamespace');
     $field->{target_namespace} = $field_target_namespace;
     
-    ( $field->{type}, $field->{type_ns} ) = remove_namespace( $element_node->getAttribute('type') );
+    ( $field->{type}, $field->{type_prefix} ) = remove_namespace( $element_node->getAttribute('type') );
+    if ( $field->{type_prefix} )
+    {
+        ( $field->{type_namespace} ) = _attribute_reverse_search($element_node, 'xmlns:' . $field->{type_prefix});
+    }
+    else
+    {
+        ( $field->{type_namespace} ) = _attribute_reverse_search($element_node, 'targetNamespace');
+    }
+    
+    die 'wat' if ref($field->{type_namespace});
+    print length($field->{type_namespace}) . "\n";
+    
     if ($prefix_override)
     {
         $field->{prefix_override} = $prefix_override;
@@ -869,22 +910,30 @@ sub parse_non_complex_element
     my $nillable = $element_node->getAttribute('nillable') || 'false';
     $field->{nillable} = $nillable eq 'false' ? 0 : 1;
 
-    print "\telement: $field->{name}, type: $field->{type}, min_occurs: $field->{min_occurs}, nillable?: $field->{nillable}\n";
+    print "\telement: $field->{name}, type: $field->{type}, min_occurs: $field->{min_occurs}, nillable?: $field->{nillable}, type: $field->{type}, targetNamespace: $field->{type_namespace}\n";
     
     return $field;
 }
 
 sub create_type_module
 {
-    my ($type_ns, $type) = @_;
+    my ($target_namespace, $type) = @_;
+    
+    print "creating type module $type->{name} in namespace $target_namespace\n";
     
     my $type_name = $type->{name} || die "cannot find name of type: " . Dumper($type);
     my $fields = $type->{fields};
     my $type_target_namespace = $type->{target_namespace};
+    my $package_name = $type->{package_name};
+    
+    my $package_path = $package_name;
+    $package_path =~ s{::}{/}g;
     
     my $extra_subs = "";
     
-    my $module = "package $PACKAGE_PREFIX::$type_name;\n";
+    my $module_name = "$PACKAGE_PREFIX::$package_name::$type_name";
+    
+    my $module = "package $module_name;\n";
     $module .= "use Moo;\n";
     $module .= "extends 'SOAP::Sanity::Type';\n\n";
     
@@ -895,11 +944,12 @@ sub create_type_module
     {
         my $field_name = $field->{name} || die "cannot find name of field in type $type_name: " . Dumper($field);
         my $field_type = $field->{type};
+        my $field_type_namespace = $field->{type_namespace};
         my $min_occurs = $field->{min_occurs};
         my $max_occurs = $field->{max_occurs};
         my $nillable = $field->{nillable};
         
-        $module .= "# type: $field_type, min_occurs: $min_occurs, max_occurs: $max_occurs, nillable: $nillable\n";
+        $module .= "# type: $field_type, min_occurs: $min_occurs, max_occurs: $max_occurs, nillable: $nillable, namespace: $field_type_namespace\n";
         
         if (( $max_occurs > 1 ) || ( $max_occurs eq 'unbounded' ))
         {
@@ -941,6 +991,7 @@ sub create_type_module
     {
         my $field_name = $field->{name};
         my $field_type = $field->{type};
+        my $field_type_namespace = $field->{type_namespace};
         my $min_occurs = $field->{min_occurs};
         my $max_occurs = $field->{max_occurs};
         my $nillable = $field->{nillable};
@@ -967,7 +1018,7 @@ sub create_type_module
         }
         
         my $is_array = ( ( $max_occurs > 1 ) || ( $max_occurs eq 'unbounded' ) ) ? 1 : 0;
-        my $is_complex = $COMPLEX_TYPES{$field_type} ? 1 : 0;
+        my $is_complex = $COMPLEX_TYPES{$field_type_namespace}->{$field_type} ? 1 : 0;
         
         $module .= $TAB . q|$self->_append_field($dom, $type_node, '| .$field_name. q|', '| .$type_target_prefix. q|', | .$is_array. q|, | .$is_complex. q|, | .$nillable. q|, | .$min_occurs. q|);| . "\n";
     }
@@ -983,18 +1034,21 @@ sub create_type_module
     {
         my $field_name = $field->{name}; # the accessor name
         my $field_type = $field->{type}; # will be the object class if this is a complex type
+        my $field_type_namespace = $field->{type_namespace};
         my $min_occurs = $field->{min_occurs};
         my $max_occurs = $field->{max_occurs};
         my $nillable = $field->{nillable};
         my $is_array = ( ( $max_occurs > 1 ) || ( $max_occurs eq 'unbounded' ) ) ? 1 : 0;
         
-        if ( $COMPLEX_TYPES{$field_type} )
+        if ( $COMPLEX_TYPES{$field_type_namespace}->{$field_type} )
         {
+            my $package_name = $COMPLEX_TYPES{$field_type_namespace}->{$field_type}->{package_name};
+            
             if ($is_array)
             {
                 $module .= $TAB . 'foreach my $node2 ( $node->findnodes("' . $field_name . '") )'. "\n";
                 $module .= $TAB . '{' . "\n";
-                $module .= "$TAB$TAB" . 'my $' . $field_name . ' = ' . "$PACKAGE_PREFIX::$field_type" . '->new();' . "\n";
+                $module .= "$TAB$TAB" . 'my $' . $field_name . ' = ' . "$PACKAGE_PREFIX::$package_name::$field_type" . '->new();' . "\n";
                 $module .= "$TAB$TAB" . '$' . $field_name . '->_unserialize($node2);'. "\n";
                 $module .= "$TAB$TAB" . '$self->add_' . $field_name . '($' . $field_name . ');' . "\n";
                 $module .= $TAB . '}' . "\n";
@@ -1002,7 +1056,7 @@ sub create_type_module
             else
             {
                 $module .= "\n";
-                $module .= $TAB . 'my $' . $field_name . ' = ' . "$PACKAGE_PREFIX::$field_type" . '->new();' . "\n";
+                $module .= $TAB . 'my $' . $field_name . ' = ' . "$PACKAGE_PREFIX::$package_name::$field_type" . '->new();' . "\n";
                 $module .= $TAB . '$' . $field_name . '->_unserialize( $node->findnodes("' . $field_name . '") );'. "\n";
                 $module .= $TAB . '$self->' . $field_name . '($' . $field_name . ');' . "\n";
                 $module .= "\n";
@@ -1031,16 +1085,17 @@ sub create_type_module
     
     # load the module into memory
     eval $module;
-    die "$module\n\nthe dymamically generated code for $PACKAGE_PREFIX::$type_name did not compile: $@" if $@;
-    eval "use $PACKAGE_PREFIX::$type_name; 1;";
-    die "$module\n\nthe dymamically generated code for $PACKAGE_PREFIX::$type_name could not be use'd: $@" if $@;
+    die "$module\n\nthe dymamically generated code for $module_name did not compile: $@" if $@;
+    eval "use $module_name; 1;";
+    die "$module\n\nthe dymamically generated code for $module_name could not be use'd: $@" if $@;
     
-    open(my $fh, ">", "$save_path/$type_name.pm") or die "cannot create $save_path/$type_name.pm: $!";
+    make_path("$save_path/$package_path/");
+    open(my $fh, ">", "$save_path/$package_path/$type_name.pm") or die "cannot create $save_path/$package_path/$type_name.pm: $!";
     print $fh $module;
     close $fh;
-    print "created $save_path/$type_name.pm\n";
+    print "created $save_path/$package_path/$type_name.pm\n";
     
-    return ("$PACKAGE_PREFIX::$type_name", "$save_path/$type_name.pm");
+    return ("$module_name", "$save_path/$package_path/$type_name.pm");
 }
 
 
@@ -1063,15 +1118,16 @@ sub add_object_creation_pod
     {
         my $field_name = $field->{name};
         my $field_type = $field->{type};
+        my $field_type_namespace = $field->{type_namespace};
         my $min_occurs = $field->{min_occurs};
         my $max_occurs = $field->{max_occurs};
         my $nillable = $field->{nillable};
 
-        if ($COMPLEX_TYPES{$field_type})
+        if ($COMPLEX_TYPES{$field_type_namespace}->{$field_type})
         {
             my $is_array = ( ( $max_occurs > 1 ) || ( $max_occurs eq 'unbounded' ) ) ? 1 : 0;
 
-            push(@recurse_these, { type => $COMPLEX_TYPES{$field_type}, field_name => $field_name, is_array => $is_array });
+            push(@recurse_these, { type => $COMPLEX_TYPES{$field_type_namespace}->{$field_type}, field_name => $field_name, is_array => $is_array });
         }
         else
         {
@@ -1127,6 +1183,38 @@ sub remove_namespace
     my ($name) = $qualified_name =~ /(\w+)$/;
     
     return wantarray ? ($name, $ns) : $name;
+}
+
+sub namespace_to_package_name
+{
+    my ($namespace) = @_;
+    
+    my $namespace_copy = $namespace;
+    
+    $namespace_copy =~ s{^\w+://}{};
+    $namespace_copy =~ s{[^\w\.\/]}{}g;
+    
+    my ($domain, $path) = $namespace_copy =~ /^([^\/]+)(.*)/;
+    $path =~ s{^/}{};
+    $path =~ s{/$}{};
+        
+    die "namespace_to_package_name fail - cannot parse namespace: $namespace" unless $domain;
+    
+    my @domain_parts = reverse split(/[\.\/]/, $domain);
+    my @path_parts = split(/[\.\/]/, $path);
+    my @parts = (@domain_parts, @path_parts);
+    
+    for (my $i = 0; $i < scalar(@parts); $i++)
+    {
+        if ($parts[$i] =~ /^\d/)
+        {
+            $parts[$i] = "\_$parts[$i]";
+        }
+    }
+    
+    my $package_name = join('::', @parts);
+    
+    return $package_name;
 }
 
 =head1 AUTHOR
