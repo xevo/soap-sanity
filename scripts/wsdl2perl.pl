@@ -547,13 +547,32 @@ foreach my $method_name ( sort keys %METHODS )
     
     my $part_order = "";
     
-    # TODO actually the response is one object deep...for simplicity, the root object is not returned (for document binding)
-    $service .= $TAB . '# returns a ' . $PACKAGE_PREFIX . '::' . $output . ' object' . "\n";
-    $service .= $TAB . 'my $' . $output . ' = $service->' . $method_name . '(' . "\n";
-    
     my $method_argument_parts;
     if ($binding eq 'document')
     {
+        my $first_output_part = $method->{output_parts}->[0];
+        my $output_part_name = $first_output_part->{name};
+        my $output_part_type = $first_output_part->{type} || $first_output_part->{element};
+        my $output_part_namespace = $first_output_part->{namespace};
+        
+        if ($COMPLEX_TYPES{$output_part_namespace}->{$output_part_type})
+        {
+            my $output_first_and_only_field = $COMPLEX_TYPES{$output_part_namespace}->{$output_part_type}->{fields}->[0];
+            my $output_type = $output_first_and_only_field->{type};
+            my $output_type_namespace = $output_first_and_only_field->{type_namespace};
+            
+            my $response_type = $COMPLEX_TYPES{$output_type_namespace}->{$output_type};
+            my $response_type_name = $response_type->{name};
+            my $response_package_name = $response_type->{package_name};
+            
+            $service .= $TAB . '# returns a ' . $PACKAGE_PREFIX . '::' . $response_package_name . '::' . $response_type_name . ' object' . "\n";
+            $service .= $TAB . 'my $' . $output_part_type . ' = $service->' . $method_name . '(' . "\n";
+        }
+        else
+        {
+            die "cannot generate pod for $method_name method: response is not a ComplexType";
+        }
+        
         # the arguments to the method are actually the arguments to the first part
         my $first_part = $method->{input_parts}->[0];
         my $part_name = $first_part->{name};
@@ -608,6 +627,10 @@ foreach my $method_name ( sort keys %METHODS )
     }
     else
     {
+        # TODO this is only correct for document binding
+        $service .= $TAB . '# returns a ' . $PACKAGE_PREFIX . '::' . $output . ' object' . "\n";
+        $service .= $TAB . 'my $' . $output . ' = $service->' . $method_name . '(' . "\n";
+        
         foreach my $part (@{ $method->{input_parts} })
         {
             my $part_name = $part->{name};
@@ -675,6 +698,7 @@ foreach my $method_name ( sort keys %METHODS )
         my $output_part_type_namespace = $input_message_part->{namespace};
         my $output_type = $COMPLEX_TYPES{$output_part_type_namespace}->{$output_part_type};
         my $output_package_name = $output_type->{package_name};
+        my $output_type_param = $output_type->{fields}->[0]->{name};
         
         die "cannot determine response type for method $method_name" unless $output_type->{name};
         
@@ -684,7 +708,7 @@ foreach my $method_name ( sort keys %METHODS )
         $service .= $TAB . 'my $response_node = $self->_make_document_request($message, \'' . $soap_action . '\');' . "\n";
         $service .= $TAB . 'my $response_object = ' . $response_class . '->new();' . "\n";
         $service .= $TAB . '$response_object->_unserialize($response_node->findnodes("Body/' . $output_part_type . '"));' . "\n";
-        $service .= $TAB . 'return $response_object;' . "\n";
+        $service .= $TAB . 'return $response_object->' . $output_type_param . ';' . "\n";
     }
     else
     {
@@ -1106,13 +1130,14 @@ sub add_object_creation_pod
     my ($is_document_root, $textref, $type, $parent_accessor_name, $parent_field_name, $parent_variable_name) = @_;
     
     my $type_name = $type->{name};
+    my $package_name = $type->{package_name};
     my $fields = $type->{fields};
     
     my @recurse_these;
     
     my $variable_name = $parent_field_name || $type_name;
     
-    $$textref .= $TAB . 'my $' . $variable_name . ' = ' . ${PACKAGE_PREFIX} . '::' . $type_name . '->new(' . "\n" unless $is_document_root;
+    $$textref .= $TAB . 'my $' . $variable_name . ' = ' . ${PACKAGE_PREFIX} . '::' . $package_name . '::' . $type_name . '->new(' . "\n" unless $is_document_root;
 
     foreach my $field (@$fields)
     {

@@ -10,7 +10,7 @@ use Data::Dumper;
 use SOAP::Sanity;
 use SOAP::Sanity::Exceptions;
 
-has agent => ( is => 'ro', default => sub { LWP::UserAgent->new(keep_alive => 3, agent => "SOAP::Sanity $SOAP::Sanity::VERSION") } );
+has agent => ( is => 'ro', default => sub { LWP::UserAgent->new(keep_alive => 3, agent => "SOAP::Sanity $SOAP::Sanity::VERSION", timeout => 30 ) } );
 has parser => ( is => 'ro', default => sub { XML::LibXML->new(); } );
 
 sub _make_document_request
@@ -152,7 +152,10 @@ sub _post
          eval
          {
              $response_content =~ s{( < (?:\s*/\s*)? ) \w+\: (\w+)}{$1$2}xg;
-             $response_content =~ s{ \s \w+: (\w+=")  }{ $1}xg;
+             $response_content =~ s{ \s \w+: (\w+=") }{ $1}xg;
+             $response_content =~ s{ xmlns=}{ xmlns_ignore=}xg;
+             
+             print "CLEAN RESPONSE: $response_content\n\n";
 
              $response_dom = $self->parser->load_xml( string => $response_content );
          };
@@ -177,7 +180,8 @@ sub _post
         eval
         {
             $response_content =~ s{( < (?:\s*/\s*)? ) \w+\: (\w+)}{$1$2}xg;
-            $response_content =~ s{ \s \w+: (\w+=")  }{ $1}xg;
+            $response_content =~ s{ \s \w+: (\w+=") }{ $1}xg;
+            $response_content =~ s{ xmlns=}{ xmlns_ignore=}xg;
             
             $response_dom = $self->parser->load_xml( string => $response_content );
 
