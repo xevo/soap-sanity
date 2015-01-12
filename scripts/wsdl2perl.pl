@@ -555,6 +555,8 @@ foreach my $method_name ( sort keys %METHODS )
         my $output_part_type = $first_output_part->{type} || $first_output_part->{element};
         my $output_part_namespace = $first_output_part->{namespace};
         
+        my $has_simple_response = 0;
+        
         if ($COMPLEX_TYPES{$output_part_namespace}->{$output_part_type})
         {
             my $output_first_and_only_field = $COMPLEX_TYPES{$output_part_namespace}->{$output_part_type}->{fields}->[0];
@@ -562,11 +564,22 @@ foreach my $method_name ( sort keys %METHODS )
             my $output_type_namespace = $output_first_and_only_field->{type_namespace};
             
             my $response_type = $COMPLEX_TYPES{$output_type_namespace}->{$output_type};
-            my $response_type_name = $response_type->{name};
-            my $response_package_name = $response_type->{package_name};
             
-            $service .= $TAB . '# returns a ' . $PACKAGE_PREFIX . '::' . $response_package_name . '::' . $response_type_name . ' object' . "\n";
-            $service .= $TAB . 'my $' . $output_part_type . ' = $service->' . $method_name . '(' . "\n";
+            if ($response_type)
+            {
+                my $response_type_name = $response_type->{name};
+                my $response_package_name = $response_type->{package_name};
+
+                $service .= $TAB . '# returns a ' . $PACKAGE_PREFIX . '::' . $response_package_name . '::' . $response_type_name . ' object' . "\n";
+                $service .= $TAB . 'my $' . $response_type_name . ' = $service->' . $method_name . '(' . "\n";
+            }
+            else
+            {
+                $has_simple_response = 1;
+                
+                $service .= $TAB . '# returns a ' . $output_type . "\n";
+                $service .= $TAB . 'my $' . $output_type . ' = $service->' . $method_name . '(' . "\n";
+            }
         }
         else
         {
@@ -624,6 +637,14 @@ foreach my $method_name ( sort keys %METHODS )
         {
             $service .= "$TAB$TAB" . $part_name . ' => "", # ' . $part_type . "\n";
         }
+        
+        $service .= $TAB . ");\n";
+
+        unless ($has_simple_response)
+        {
+            $service .= "\n";
+            add_object_response_pod(1, \$service, $COMPLEX_TYPES{$output_part_namespace}->{$output_part_type});
+        }
     }
     else
     {
@@ -667,9 +688,9 @@ foreach my $method_name ( sort keys %METHODS )
 
             $part_order .= "$part_name ";
         }
+        
+        $service .= $TAB . ");\n";
     }
-
-    $service .= $TAB . ");\n";
     
     $service .= "\n=cut\n\n";
     
@@ -1122,9 +1143,6 @@ sub create_type_module
     return ("$module_name", "$save_path/$package_path/$type_name.pm");
 }
 
-
-# $is_document_root will be true if the method has not recursed and it is document binding
-# 
 sub add_object_creation_pod
 {
     my ($is_document_root, $textref, $type, $parent_accessor_name, $parent_field_name, $parent_variable_name) = @_;
@@ -1192,6 +1210,61 @@ sub add_object_creation_pod
         else
         {
             add_object_creation_pod(0, $textref, $recurse_ref->{type}, $new_parent_accessor_name, $recurse_ref->{field_name}, $variable_name);
+        }
+    }
+    
+    return;
+}
+
+sub add_object_response_pod
+{
+    my ($is_document_root, $textref, $type, $parent_variable_name) = @_;
+    
+    my $type_name = $type->{name};
+    my $package_name = $type->{package_name};
+    my $fields = $type->{fields};
+    
+    my $variable_name = $type_name;
+    
+    foreach my $field (@$fields)
+    {
+        my $field_name = $field->{name};
+        my $field_type = $field->{type};
+        my $field_type_namespace = $field->{type_namespace};
+        my $min_occurs = $field->{min_occurs};
+        my $max_occurs = $field->{max_occurs};
+        my $nillable = $field->{nillable};
+        my $is_array = ( ( $max_occurs > 1 ) || ( $max_occurs eq 'unbounded' ) ) ? 1 : 0;
+        
+        if ($is_array)
+        {
+            $$textref .= "$TAB" . 'foreach my $ref (@{ ' . $variable_name . '->' . $field_name . ' }) {' . "\n";
+        }
+        
+        if ($COMPLEX_TYPES{$field_type_namespace}->{$field_type})
+        {
+            add_object_response_pod(0, $textref, $COMPLEX_TYPES{$field_type_namespace}->{$field_type});
+        }
+        else
+        {
+            my $caller_variable_name;
+            
+            if ($is_array)
+            {
+                $$textref .= "$TAB";
+                $caller_variable_name = 'ref';
+            }
+            else
+            {
+                $caller_variable_name = $variable_name;
+            }
+            
+            $$textref .= "$TAB" . 'my $' . $field_name . ' = $' . $caller_variable_name . '->' . $field_name . "; # $field_type\n";
+        }
+        
+        if ($is_array)
+        {
+            $$textref .= "$TAB}\n";
         }
     }
     
