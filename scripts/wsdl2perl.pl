@@ -472,7 +472,8 @@ print "**********************************************************************\n"
 my $service_module_name = $PACKAGE_PREFIX . 'Client';
 my $service = "package $service_module_name;\n";
 $service .= "use Moo;\n";
-$service .= "extends 'SOAP::Sanity::Service';\n\n";
+$service .= "extends 'SOAP::Sanity::Service';\n";
+$service .= "# generated off WSDL at: $WSDL_URI\n\n";
 $service .= "use ${PACKAGE_PREFIX}::SOAPSanityObjects;\n\n";
 
 $service .= "has service_uri => ( is => 'ro', default => sub { '" . $service_uri . "' } );\n";
@@ -555,35 +556,36 @@ foreach my $method_name ( sort keys %METHODS )
         my $output_part_type = $first_output_part->{type} || $first_output_part->{element};
         my $output_part_namespace = $first_output_part->{namespace};
         
+        my $response_variable_name;
         my $has_simple_response = 0;
         
-        if ($COMPLEX_TYPES{$output_part_namespace}->{$output_part_type})
+        unless ($COMPLEX_TYPES{$output_part_namespace}->{$output_part_type})
         {
-            my $output_first_and_only_field = $COMPLEX_TYPES{$output_part_namespace}->{$output_part_type}->{fields}->[0];
-            my $output_type = $output_first_and_only_field->{type};
-            my $output_type_namespace = $output_first_and_only_field->{type_namespace};
-            
-            my $response_type = $COMPLEX_TYPES{$output_type_namespace}->{$output_type};
-            
-            if ($response_type)
-            {
-                my $response_type_name = $response_type->{name};
-                my $response_package_name = $response_type->{package_name};
+            die "cannot generate pod for $method_name method: response is not a ComplexType";
+        }
+        
+        my $output_first_and_only_field = $COMPLEX_TYPES{$output_part_namespace}->{$output_part_type}->{fields}->[0];
+        my $output_type = $output_first_and_only_field->{type};
+        my $output_type_namespace = $output_first_and_only_field->{type_namespace};
+        
+        my $response_type = $COMPLEX_TYPES{$output_type_namespace}->{$output_type};
+        
+        if ($response_type)
+        {
+            my $response_type_name = $response_type->{name};
+            my $response_package_name = $response_type->{package_name};
+            $response_variable_name = $response_type_name;
 
-                $service .= $TAB . '# returns a ' . $PACKAGE_PREFIX . '::' . $response_package_name . '::' . $response_type_name . ' object' . "\n";
-                $service .= $TAB . 'my $' . $response_type_name . ' = $service->' . $method_name . '(' . "\n";
-            }
-            else
-            {
-                $has_simple_response = 1;
-                
-                $service .= $TAB . '# returns a ' . $output_type . "\n";
-                $service .= $TAB . 'my $' . $output_type . ' = $service->' . $method_name . '(' . "\n";
-            }
+            $service .= $TAB . '# returns a ' . $PACKAGE_PREFIX . '::' . $response_package_name . '::' . $response_type_name . ' object' . "\n";
+            $service .= $TAB . 'my $' . $response_variable_name . ' = $service->' . $method_name . '(' . "\n";
         }
         else
         {
-            die "cannot generate pod for $method_name method: response is not a ComplexType";
+            $response_variable_name = $output_type;
+            $has_simple_response = 1;
+            
+            $service .= $TAB . '# returns a ' . $output_type . "\n";
+            $service .= $TAB . 'my $' . $response_variable_name . ' = $service->' . $method_name . '(' . "\n";
         }
         
         # the arguments to the method are actually the arguments to the first part
@@ -643,7 +645,7 @@ foreach my $method_name ( sort keys %METHODS )
         unless ($has_simple_response)
         {
             $service .= "\n";
-            add_object_response_pod(1, \$service, $COMPLEX_TYPES{$output_part_namespace}->{$output_part_type});
+            add_object_response_pod({}, 0, 1, \$service, $response_type, $response_variable_name);
         }
     }
     else
@@ -797,8 +799,12 @@ sub parse_complex_type
     my @fields;
     
     my $node_name = remove_namespace( $type_node->nodeName );
-    my $name = remove_namespace( $type_node->getAttribute('name') ) || "";
-    my $type = remove_namespace( $type_node->getAttribute('type') ) || "";
+    
+    my $name = remove_namespace( $type_node->getAttribute('name') );
+    $name ||= "";
+    
+    my $type = remove_namespace( $type_node->getAttribute('type') );
+    $type ||= "";
     
     print "\n";
     print "**********************************************************************\n";
@@ -942,19 +948,23 @@ sub parse_non_complex_element
     }
     
     die 'wat' if ref($field->{type_namespace});
-    print length($field->{type_namespace}) . "\n";
     
     if ($prefix_override)
     {
         $field->{prefix_override} = $prefix_override;
     }
     
-    $field->{min_occurs} = $element_node->getAttribute('minOccurs') || 1;
-    $field->{max_occurs} = $element_node->getAttribute('maxOccurs') || 1;
+    $field->{min_occurs} = $element_node->getAttribute('minOccurs');
+    $field->{min_occurs} = 1 unless defined($field->{min_occurs});
     
-    my $nillable = $element_node->getAttribute('nillable') || 'false';
+    $field->{max_occurs} = $element_node->getAttribute('maxOccurs');
+    $field->{max_occurs} = 1 unless defined($field->{max_occurs});
+    
+    my $nillable = $element_node->getAttribute('nillable');
+    $nillable = 'false' unless defined($nillable);
     $field->{nillable} = $nillable eq 'false' ? 0 : 1;
-
+    
+    print "$element_node\n";
     print "\telement: $field->{name}, type: $field->{type}, min_occurs: $field->{min_occurs}, nillable?: $field->{nillable}, type: $field->{type}, targetNamespace: $field->{type_namespace}\n";
     
     return $field;
@@ -1218,13 +1228,25 @@ sub add_object_creation_pod
 
 sub add_object_response_pod
 {
-    my ($is_document_root, $textref, $type, $parent_variable_name) = @_;
+    my ($seen, $depth, $is_document_root, $textref, $type, $parent_variable_name) = @_;
     
     my $type_name = $type->{name};
     my $package_name = $type->{package_name};
     my $fields = $type->{fields};
     
-    my $variable_name = $type_name;
+    # try to stop infinite loops
+    # dont pass this as a reference,
+    # we only need to keep track of the current recursion tree
+    my %seen = %$seen;
+    my $seen_key = $type_name . '__' . $package_name;
+    if ($seen{$seen_key})
+    {
+        warn "circular reference detected in type $type_name...breaking out of recursion branch\n";
+        return;
+    }
+    $seen{$seen_key} = 1;
+    
+    my $variable_name = $parent_variable_name || $type_name;
     
     foreach my $field (@$fields)
     {
@@ -1235,36 +1257,33 @@ sub add_object_response_pod
         my $max_occurs = $field->{max_occurs};
         my $nillable = $field->{nillable};
         my $is_array = ( ( $max_occurs > 1 ) || ( $max_occurs eq 'unbounded' ) ) ? 1 : 0;
+        my $is_complex = $COMPLEX_TYPES{$field_type_namespace}->{$field_type} ? 1 : 0;
         
         if ($is_array)
         {
-            $$textref .= "$TAB" . 'foreach my $ref (@{ ' . $variable_name . '->' . $field_name . ' }) {' . "\n";
-        }
-        
-        if ($COMPLEX_TYPES{$field_type_namespace}->{$field_type})
-        {
-            add_object_response_pod(0, $textref, $COMPLEX_TYPES{$field_type_namespace}->{$field_type});
+            $$textref .= "$TAB"x$depth;
+            $$textref .= "$TAB" . 'foreach my $' . $field_name . ' (@{ $' . $variable_name . '->' . $field_name . ' })' . "\n";
+            $$textref .= "$TAB"x$depth;
+            $$textref .= "$TAB" . '{' . "\n";
         }
         else
         {
-            my $caller_variable_name;
-            
-            if ($is_array)
-            {
-                $$textref .= "$TAB";
-                $caller_variable_name = 'ref';
-            }
-            else
-            {
-                $caller_variable_name = $variable_name;
-            }
-            
-            $$textref .= "$TAB" . 'my $' . $field_name . ' = $' . $caller_variable_name . '->' . $field_name . "; # $field_type\n";
+            $$textref .= "\n" if $is_complex;
+            $$textref .= "$TAB"x$depth;
+            $$textref .= "$TAB" . 'my $' . $field_name . ' = $' . $variable_name . '->' . $field_name . "; # $field_type\n";
+        }
+        
+        if ($is_complex)
+        {
+            my $new_depth = $depth;
+            $new_depth++ if $is_array;
+            add_object_response_pod(\%seen, $new_depth, 0, $textref, $COMPLEX_TYPES{$field_type_namespace}->{$field_type}, $field_name);
         }
         
         if ($is_array)
         {
-            $$textref .= "$TAB}\n";
+            $$textref .= "$TAB"x$depth;
+            $$textref .= "$TAB}\n\n";
         }
     }
     

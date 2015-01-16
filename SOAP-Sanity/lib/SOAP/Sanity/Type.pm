@@ -61,15 +61,17 @@ sub _append_field
         }
     }
     # TODO what if it is $min_occurs == 0 but we want to send null?
+    # maybe set it to something like a SOAP::Sanity::Type::Null object?
     elsif ($min_occurs == 0)
     {
         # skip it
     }
     elsif ($nillable)
     {
-        #my $nil_node = $dom->createElement("$namespace:$field_name");
-        #$nil_node->setAttribute('xsi:nil', 'true');
-        #$parent_node->appendChild($nil_node);
+        print "$field_name - min occurs $min_occurs\n";
+        my $nil_node = $dom->createElement("$namespace:$field_name");
+        $nil_node->setAttribute('xsi:nil', 'true');
+        $parent_node->appendChild($nil_node);
     }
     elsif ($min_occurs > 0)
     {

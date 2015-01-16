@@ -40,6 +40,7 @@ sub _make_document_request
     my $root_string =q|<?xml version="1.0" encoding="UTF-8"?>
         <SOAP-ENV:Envelope
             xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/"
+            xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
             |;
             foreach my $namespace (@{ $self->target_namespaces })
             {
