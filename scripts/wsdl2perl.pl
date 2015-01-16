@@ -1262,7 +1262,7 @@ sub add_object_response_pod
         if ($is_array)
         {
             $$textref .= "$TAB"x$depth;
-            $$textref .= "$TAB" . 'foreach my $' . $field_name . ' (@{ $' . $variable_name . '->' . $field_name . ' })' . "\n";
+            $$textref .= "$TAB" . 'foreach my $' . $field_name . ' (@{ $' . $variable_name . '->' . $field_name . ' }) # ' . $field_type . "\n";
             $$textref .= "$TAB"x$depth;
             $$textref .= "$TAB" . '{' . "\n";
         }
