@@ -378,6 +378,8 @@ foreach my $type_node (@types_nodes)
     }
 }
 
+# you must call this with parens around the return values:
+#   my ( $element_namespace, $element_node ) = _attribute_reverse_search($node, 'xmlns:' . $element_namespace_prefix);
 sub _attribute_reverse_search
 {
     my ($element, $name) = @_;
@@ -834,10 +836,23 @@ sub parse_complex_type
                 foreach my $extension_node ( $node->findnodes($SCHEMA_NS.':extension') )
                 {
                     my ($base_name, $base_prefix) = remove_namespace( $extension_node->findvalue('@base') );
+                    
                     if ($base_name)
                     {
                         print "found extension base: $base_name\n";
                         print 'looking for base complexType with xpath: ' . '//'.$SCHEMA_NS.':complexType[@name=\'' . $base_name . '\']' . "\n";
+                        
+                        my $base_namespace = $field_target_namespace;
+                        
+                        if ($base_prefix)
+                        {
+                            my ($new_field_target_namespace) = _attribute_reverse_search($extension_node, 'xmlns:' . $base_prefix);
+                            if (( $new_field_target_namespace ) && ( $new_field_target_namespace ne $field_target_namespace ))
+                            {
+                                $base_namespace = $new_field_target_namespace;
+                                print "base namespace: $base_namespace\n";
+                            }
+                        }
                         
                         # TODO what if the base node is in a different <schema>?
                         my ($base_node) = $SCHEMA_NODE->findnodes('//'.$SCHEMA_NS.':complexType[@name=\'' . $base_name . '\']');
@@ -852,18 +867,18 @@ sub parse_complex_type
                             # TODO "choice" could be a parent
                             my ($base_sequence) = $base_node->findnodes("$SCHEMA_NS:sequence|$SCHEMA_NS:all");
                             # pass the $base_prefix of this base type so that the parent type can inherit it
-                            push(@fields, parse_sequence($base_sequence, $field_target_namespace, $base_prefix));
+                            push(@fields, parse_sequence($base_sequence, $base_namespace, $base_prefix));
                         }
                         else
                         {
                             die "cannot load extension with base name: $base_name";
                         }
                         
-                        print "Extending \"$base_name\" type with these fields:\n";
+                        print "Extending \"$base_name\" type with these fields: (namespace: $base_namespace)\n";
                         
                         # TODO "choice" could be a parent
                         my ($additional_sequence) = $extension_node->findnodes("$SCHEMA_NS:sequence|$SCHEMA_NS:all");
-                        # pass the $base_prefix of this base type so that the parent type can inherit it
+                        # pass the parent $field_target_namespace for these additional fields
                         push(@fields, parse_sequence($additional_sequence, $field_target_namespace, $base_prefix));
                     }
                 }
@@ -964,7 +979,7 @@ sub parse_non_complex_element
     $nillable = 'false' unless defined($nillable);
     $field->{nillable} = $nillable eq 'false' ? 0 : 1;
     
-    print "$element_node\n";
+    #print "$element_node\n";
     print "\telement: $field->{name}, type: $field->{type}, min_occurs: $field->{min_occurs}, nillable?: $field->{nillable}, type: $field->{type}, targetNamespace: $field->{type_namespace}\n";
     
     return $field;
@@ -1000,11 +1015,12 @@ sub create_type_module
         my $field_name = $field->{name} || die "cannot find name of field in type $type_name: " . Dumper($field);
         my $field_type = $field->{type};
         my $field_type_namespace = $field->{type_namespace};
+        my $field_target_namespace = $field->{target_namespace};
         my $min_occurs = $field->{min_occurs};
         my $max_occurs = $field->{max_occurs};
         my $nillable = $field->{nillable};
         
-        $module .= "# type: $field_type, min_occurs: $min_occurs, max_occurs: $max_occurs, nillable: $nillable, namespace: $field_type_namespace\n";
+        $module .= "# type: $field_type, min_occurs: $min_occurs, max_occurs: $max_occurs, nillable: $nillable, target namespace: $field_target_namespace\n";
         
         if (( $max_occurs > 1 ) || ( $max_occurs eq 'unbounded' ))
         {
@@ -1066,6 +1082,8 @@ sub create_type_module
             $field_target_namespace = $field->{target_namespace};
         }
         
+        #die "no namespace prefix found for field: $field_name" unless $field_target_prefix;
+        
         my $type_target_prefix = $ADDED_NAMESPACES{$type_target_namespace};
         if ( $field->{prefix_override} )
         {
@@ -1075,7 +1093,7 @@ sub create_type_module
         my $is_array = ( ( $max_occurs > 1 ) || ( $max_occurs eq 'unbounded' ) ) ? 1 : 0;
         my $is_complex = $COMPLEX_TYPES{$field_type_namespace}->{$field_type} ? 1 : 0;
         
-        $module .= $TAB . q|$self->_append_field($dom, $type_node, '| .$field_name. q|', '| .$type_target_prefix. q|', | .$is_array. q|, | .$is_complex. q|, | .$nillable. q|, | .$min_occurs. q|);| . "\n";
+        $module .= $TAB . q|$self->_append_field($dom, $type_node, '| .$field_name. q|', '| .$field_target_prefix. q|', | .$is_array. q|, | .$is_complex. q|, | .$nillable. q|, | .$min_occurs. q|);| . "\n";
     }
     $module .= "\n";
     $module .= $TAB . 'return $type_node;' . "\n";
