@@ -866,7 +866,8 @@ sub parse_complex_type
                             
                             # TODO "choice" could be a parent
                             my ($base_sequence) = $base_node->findnodes("$SCHEMA_NS:sequence|$SCHEMA_NS:all");
-                            # pass the $base_prefix of this base type so that the parent type can inherit it
+                            # the namespace prefix of these base fields comes from the namespace in the @base type
+                            # these could have a different namespace than the extended fields that will be added to this base type!
                             push(@fields, parse_sequence($base_sequence, $base_namespace, $base_prefix));
                         }
                         else
